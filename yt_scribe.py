@@ -9,9 +9,17 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+
+
+def _prepend_src() -> None:
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+
 
 def _load_package() -> ModuleType:
-    package_dir = Path(__file__).resolve().parent / "src" / "yt_scribe"
+    package_dir = SRC / "yt_scribe"
     spec = importlib.util.spec_from_file_location(
         "yt_scribe",
         package_dir / "__init__.py",
@@ -25,7 +33,8 @@ def _load_package() -> ModuleType:
     return module
 
 
-_package = _load_package()
-
 if __name__ == "__main__":
+    _prepend_src()
     raise SystemExit(importlib.import_module("yt_scribe.cli").main())
+
+sys.modules[__name__] = _load_package()
