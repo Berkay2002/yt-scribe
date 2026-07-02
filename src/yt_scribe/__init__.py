@@ -5160,6 +5160,9 @@ ai contract:
 
 _transcripts = importlib.import_module(".transcripts", __name__)
 _youtube = importlib.import_module(".youtube", __name__)
+_batch = importlib.import_module(".batch", __name__)
+_config = importlib.import_module(".config", __name__)
+_setup = importlib.import_module(".setup", __name__)
 
 _YOUTUBE_COMPAT_NAMES = (
     "http_get",
@@ -5204,13 +5207,69 @@ _TRANSCRIPT_COMPAT_NAMES = (
     "transcript_segment_line",
     "plan_deep_chunks",
 )
+_CONFIG_COMPAT_NAMES = (
+    "cache_dir_from_args",
+    "validate_proxy_url",
+    "proxy_config_from_args",
+    "config_path",
+    "project_config_path",
+    "read_config_file",
+    "merge_configs",
+    "read_config",
+    "write_config",
+    "effective_agent_harness",
+    "config_payload",
+    "normalize_profile_languages",
+    "profile_from_args",
+    "get_profile",
+    "apply_profile",
+    "agent_harness_status",
+    "install_bin_dir",
+    "local_install_command",
+    "doctor_payload",
+    "lifecycle_steps",
+)
+_SETUP_COMPAT_NAMES = (
+    "command_path",
+    "command_invocation",
+    "command_output",
+    "agents_skills_dir",
+    "source_asset_path",
+    "asset_content",
+    "skill_asset_targets",
+    "install_skills",
+    "setup_payload",
+    "skills_payload",
+)
+_BATCH_COMPAT_NAMES = (
+    "next_available_path",
+    "default_run_output_path",
+    "default_polish_output_path",
+    "batch_output_path",
+    "read_batch_urls",
+    "expand_batch_items",
+)
 _YOUTUBE_COMPAT_ORIGINALS = {name: getattr(_youtube, name) for name in _YOUTUBE_COMPAT_NAMES}
 _TRANSCRIPT_COMPAT_ORIGINALS = {
     name: getattr(_transcripts, name) for name in _TRANSCRIPT_COMPAT_NAMES
 }
+_CONFIG_COMPAT_ORIGINALS = {name: getattr(_config, name) for name in _CONFIG_COMPAT_NAMES}
+_SETUP_COMPAT_ORIGINALS = {name: getattr(_setup, name) for name in _SETUP_COMPAT_NAMES}
+_BATCH_COMPAT_ORIGINALS = {name: getattr(_batch, name) for name in _BATCH_COMPAT_NAMES}
 _TRANSCRIPT_DEPENDENCY_ORIGINALS = {
     "extract_video_id": _YOUTUBE_COMPAT_ORIGINALS["extract_video_id"],
     "fetch_transcript": _YOUTUBE_COMPAT_ORIGINALS["fetch_transcript"],
+}
+_CONFIG_DEPENDENCY_ORIGINALS = {
+    "command_output": _SETUP_COMPAT_ORIGINALS["command_output"],
+    "command_path": _SETUP_COMPAT_ORIGINALS["command_path"],
+    "skills_payload": _SETUP_COMPAT_ORIGINALS["skills_payload"],
+    "normalize_languages": _YOUTUBE_COMPAT_ORIGINALS["normalize_languages"],
+}
+_BATCH_DEPENDENCY_ORIGINALS = {
+    "canonical_watch_url": _YOUTUBE_COMPAT_ORIGINALS["canonical_watch_url"],
+    "fetch_playlist_video_ids": _YOUTUBE_COMPAT_ORIGINALS["fetch_playlist_video_ids"],
+    "playlist_id_from_url": _YOUTUBE_COMPAT_ORIGINALS["playlist_id_from_url"],
 }
 
 
@@ -5232,6 +5291,33 @@ def _sync_transcript_compat_globals() -> None:
     for name, original in _TRANSCRIPT_DEPENDENCY_ORIGINALS.items():
         value = globals().get(name, original)
         setattr(_transcripts, name, original if _is_compat_wrapper(value) else value)
+
+
+def _sync_setup_compat_globals() -> None:
+    for name, original in _SETUP_COMPAT_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_setup, name, original if _is_compat_wrapper(value) else value)
+
+
+def _sync_config_compat_globals() -> None:
+    _sync_setup_compat_globals()
+    _sync_youtube_compat_globals()
+    for name, original in _CONFIG_COMPAT_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_config, name, original if _is_compat_wrapper(value) else value)
+    for name, original in _CONFIG_DEPENDENCY_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_config, name, original if _is_compat_wrapper(value) else value)
+
+
+def _sync_batch_compat_globals() -> None:
+    _sync_youtube_compat_globals()
+    for name, original in _BATCH_COMPAT_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_batch, name, original if _is_compat_wrapper(value) else value)
+    for name, original in _BATCH_DEPENDENCY_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_batch, name, original if _is_compat_wrapper(value) else value)
 
 
 def _youtube_compat_function(name: str) -> Callable[..., Any]:
@@ -5260,11 +5346,59 @@ def _transcript_compat_function(name: str) -> Callable[..., Any]:
     return wrapper
 
 
+def _setup_compat_function(name: str) -> Callable[..., Any]:
+    original = _SETUP_COMPAT_ORIGINALS[name]
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        _sync_setup_compat_globals()
+        return original(*args, **kwargs)
+
+    wrapper.__name__ = name
+    wrapper.__doc__ = original.__doc__
+    wrapper._yt_scribe_compat_wrapper = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+def _config_compat_function(name: str) -> Callable[..., Any]:
+    original = _CONFIG_COMPAT_ORIGINALS[name]
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        _sync_config_compat_globals()
+        return original(*args, **kwargs)
+
+    wrapper.__name__ = name
+    wrapper.__doc__ = original.__doc__
+    wrapper._yt_scribe_compat_wrapper = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+def _batch_compat_function(name: str) -> Callable[..., Any]:
+    original = _BATCH_COMPAT_ORIGINALS[name]
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        _sync_batch_compat_globals()
+        return original(*args, **kwargs)
+
+    wrapper.__name__ = name
+    wrapper.__doc__ = original.__doc__
+    wrapper._yt_scribe_compat_wrapper = True  # type: ignore[attr-defined]
+    return wrapper
+
+
 for _name in _YOUTUBE_COMPAT_NAMES:
     globals()[_name] = _youtube_compat_function(_name)
 
 for _name in _TRANSCRIPT_COMPAT_NAMES:
     globals()[_name] = _transcript_compat_function(_name)
+
+for _name in _SETUP_COMPAT_NAMES:
+    globals()[_name] = _setup_compat_function(_name)
+
+for _name in _CONFIG_COMPAT_NAMES:
+    globals()[_name] = _config_compat_function(_name)
+
+for _name in _BATCH_COMPAT_NAMES:
+    globals()[_name] = _batch_compat_function(_name)
 
 
 def main(argv: list[str] | None = None) -> int:
