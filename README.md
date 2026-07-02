@@ -222,14 +222,18 @@ opencode run "<instruction>" --file <temp-transcript-file> --format json
 
 The final text is read from OpenCode JSON events. Run `yt-scribe doctor` to check whether `codex` and `opencode` are available and whether their auth commands report usable local configuration.
 
-If the optional Codex plugin is installed, the inner `codex exec` agent uses a dedicated `yt-scribe-transcript-polisher` skill for the transcript rewrite. A separate `yt-scribe` skill is for outer Codex agents that want to run the CLI.
+If the optional plugin skills are installed, the inner agent uses `yt-scribe-transcript-polisher` for the transcript rewrite. The skill has harness-specific notes so Codex and OpenCode do not need to read each other's command details.
 
-## Codex Plugin
+## Plugin Skills
 
-This repository also contains a Codex plugin:
+This repository also contains plugin skills:
 
-- `skills/yt-scribe`: for an outer Codex agent that wants to use the CLI.
-- `skills/yt-scribe-transcript-polisher`: for the inner `codex exec` agent that receives transcript text on stdin and rewrites it.
+- `skills/yt-scribe`: for an outer agent that wants to use the CLI.
+- `skills/yt-scribe/harness/codex.md`: Codex-specific outer CLI instructions.
+- `skills/yt-scribe/harness/opencode.md`: OpenCode-specific outer CLI instructions.
+- `skills/yt-scribe-transcript-polisher`: for the inner agent that receives transcript text and rewrites it.
+- `skills/yt-scribe-transcript-polisher/harness/codex.md`: Codex stdin polishing instructions.
+- `skills/yt-scribe-transcript-polisher/harness/opencode.md`: OpenCode attached-file polishing instructions.
 
 The split matters. The outer agent fetches, saves, and chains commands. The inner agent only transforms transcript text and should not fetch videos or run shell commands.
 

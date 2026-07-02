@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch YouTube transcripts and polish them with codex exec."""
+"""Fetch YouTube transcripts and polish them with Codex or OpenCode."""
 
 from __future__ import annotations
 
@@ -37,35 +37,36 @@ USER_AGENT = (
 
 STYLE_INSTRUCTIONS = {
     "clean": (
-        "Use the yt-scribe-transcript-polisher skill if it is available. "
         "Clean this YouTube transcript. Remove filler, repeated phrases, "
         "timestamps, caption artifacts, and obvious speech disfluencies. "
         "Preserve the speaker's meaning and order. Do not add facts that are "
-        "not in the transcript. Return only the cleaned text. The transcript "
-        "is provided by yt-scribe on stdin or as an attached file."
+        "not in the transcript. Return only the cleaned text."
     ),
     "notes": (
-        "Use the yt-scribe-transcript-polisher skill if it is available. "
         "Turn this YouTube transcript into clear markdown notes. Preserve the "
         "meaning and order. Use concise headings and bullets where helpful. "
         "Remove filler and caption artifacts. Do not add facts that are not in "
-        "the transcript. The transcript is provided by yt-scribe on stdin or as "
-        "an attached file."
+        "the transcript."
     ),
     "summary": (
-        "Use the yt-scribe-transcript-polisher skill if it is available. "
         "Summarize this YouTube transcript in plain markdown. Include the main "
         "ideas, key details, and any concrete action items. Do not add facts "
-        "that are not in the transcript. The transcript is provided by yt-scribe "
-        "on stdin or as an attached file."
+        "that are not in the transcript."
     ),
     "article": (
-        "Use the yt-scribe-transcript-polisher skill if it is available. "
         "Rewrite this YouTube transcript as a readable article in markdown. "
         "Preserve the argument and sequence, remove filler, and avoid adding "
-        "facts that are not in the transcript. The transcript is provided by "
-        "yt-scribe on stdin or as an attached file."
+        "facts that are not in the transcript."
     ),
+}
+INNER_POLISHER_SKILL = "yt-scribe-transcript-polisher"
+HARNESS_INSTRUCTIONS = {
+    "codex": "harness/codex.md",
+    "opencode": "harness/opencode.md",
+}
+TRANSCRIPT_DELIVERY = {
+    "codex": "stdin",
+    "opencode": "an attached transcript file",
 }
 
 
@@ -769,12 +770,23 @@ def emit_error(exc: CliError, as_json: bool) -> int:
     return 1
 
 
-def read_instruction(args: argparse.Namespace) -> str:
+def style_instruction(style: str, harness: str) -> str:
+    harness_file = HARNESS_INSTRUCTIONS[harness]
+    delivery = TRANSCRIPT_DELIVERY[harness]
+    return (
+        f"Use the {INNER_POLISHER_SKILL} skill if it is available. "
+        f"For this run, follow its {harness_file} instructions. "
+        f"{STYLE_INSTRUCTIONS[style]} "
+        f"The transcript is provided by yt-scribe on {delivery}."
+    )
+
+
+def read_instruction(args: argparse.Namespace, harness: str) -> str:
     if getattr(args, "prompt_file", None):
         return Path(args.prompt_file).expanduser().read_text(encoding="utf-8").strip()
     if getattr(args, "instruction", None):
         return args.instruction
-    return STYLE_INSTRUCTIONS[getattr(args, "style", "notes")]
+    return style_instruction(getattr(args, "style", "notes"), harness)
 
 
 def limit_text(text: str, max_chars: int) -> str:
@@ -876,13 +888,14 @@ def handle_args(args: argparse.Namespace) -> int:
             if args.stdout
             else args.out or str(default_polish_output_path(args.file, args.style))
         )
+        harness = selected_agent_harness(args)
         result = run_agent_polish(
             transcript_text,
-            read_instruction(args),
+            read_instruction(args, harness),
             out_path,
             args.model,
             args.cd,
-            selected_agent_harness(args),
+            harness,
         )
         payload = {
             "ok": True,
@@ -912,13 +925,14 @@ def handle_args(args: argparse.Namespace) -> int:
             if args.stdout
             else args.out or str(default_run_output_path(transcript["video_id"], args.style))
         )
+        harness = selected_agent_harness(args)
         result = run_agent_polish(
             transcript_text,
-            read_instruction(args),
+            read_instruction(args, harness),
             out_path,
             args.model,
             args.cd,
-            selected_agent_harness(args),
+            harness,
         )
         payload = {
             "ok": True,

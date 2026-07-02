@@ -85,9 +85,20 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(steps, ["check", "inspect", "fetch", "polish", "run"])
 
     def test_builtin_style_prompts_trigger_inner_polisher_skill(self):
-        for instruction in yt_scribe.STYLE_INSTRUCTIONS.values():
+        for style in yt_scribe.STYLE_INSTRUCTIONS:
+            instruction = yt_scribe.style_instruction(style, "codex")
             self.assertIn("yt-scribe-transcript-polisher", instruction)
+            self.assertIn("harness/codex.md", instruction)
             self.assertIn("stdin", instruction)
+            self.assertNotIn("opencode", instruction.lower())
+
+    def test_opencode_style_prompts_use_opencode_harness_file(self):
+        instruction = yt_scribe.style_instruction("notes", "opencode")
+
+        self.assertIn("yt-scribe-transcript-polisher", instruction)
+        self.assertIn("harness/opencode.md", instruction)
+        self.assertIn("attached transcript file", instruction)
+        self.assertNotIn("codex", instruction.lower())
 
     def test_fetch_transcript_uses_transcript_api_backend(self):
         transcript = yt_scribe.fetch_transcript("dQw4w9WgXcQ", "en", api=FakeTranscriptApi())
