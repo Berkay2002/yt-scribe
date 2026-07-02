@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -59,6 +60,23 @@ class FakeMultiLangTranscriptApi:
         return [FakeSnippet(text="fallback transcript", start=0.0, duration=1.0)]
 
 
+class BlockedTranscriptApi:
+    def list(self, video_id):
+        raise RuntimeError("YouTube is blocking requests from your IP")
+
+    def fetch(self, video_id, languages):
+        raise AssertionError("fetch should not be called when listing fails")
+
+
+class FetchBlockedTranscriptApi:
+    def list(self, video_id):
+        assert video_id == "dQw4w9WgXcQ"
+        return [FakeTrack(language_code="en", language="English")]
+
+    def fetch(self, video_id, languages):
+        raise RuntimeError("YouTube is blocking requests from your IP")
+
+
 class YtScribeTests(unittest.TestCase):
     def test_extract_video_id_from_common_urls(self):
         self.assertEqual(yt_scribe.extract_video_id("dQw4w9WgXcQ"), "dQw4w9WgXcQ")
@@ -96,6 +114,24 @@ class YtScribeTests(unittest.TestCase):
     def test_srt_timestamp(self):
         self.assertEqual(yt_scribe.srt_timestamp(3661.234), "01:01:01,234")
 
+    def test_timestamp_anchor_uses_short_format_until_hour_mark(self):
+        self.assertEqual(yt_scribe.timestamp_anchor(61.2), "01:01")
+        self.assertEqual(yt_scribe.timestamp_anchor(3661.2), "01:01:01")
+
+    def test_render_timestamped_transcript_uses_segment_start_times(self):
+        transcript = {
+            "segments": [
+                {"start": 1.2, "duration": 0.5, "text": "hello"},
+                {"start": 62.0, "duration": 0.5, "text": "world"},
+                {"start": 63.0, "duration": 0.5, "text": "   "},
+            ],
+        }
+
+        self.assertEqual(
+            yt_scribe.render_timestamped_transcript(transcript),
+            "[00:01] hello\n[01:02] world",
+        )
+
     def test_lifecycle_is_exposed(self):
         steps = [item["step"] for item in yt_scribe.lifecycle_steps()]
         self.assertEqual(steps, ["check", "inspect", "fetch", "polish", "run"])
@@ -123,6 +159,7 @@ class YtScribeTests(unittest.TestCase):
             focus_file=None,
             instruction=None,
             prompt_file=None,
+            timestamps=False,
         )
 
         instruction = yt_scribe.resolve_instruction(args, "codex")
@@ -134,6 +171,23 @@ class YtScribeTests(unittest.TestCase):
         self.assertIn("Custom user instructions", instruction.text)
         self.assertIn("Only list decisions and risks.", instruction.text)
 
+    def test_timestamp_instructions_extend_builtin_prompt(self):
+        args = argparse.Namespace(
+            style="notes",
+            focus=None,
+            focus_file=None,
+            instruction=None,
+            prompt_file=None,
+            timestamps=True,
+        )
+
+        instruction = yt_scribe.resolve_instruction(args, "codex")
+
+        self.assertEqual(instruction.mode, "style")
+        self.assertEqual(instruction.sources, ["--style", "--timestamps"])
+        self.assertIn("timestamp anchors", instruction.text)
+        self.assertIn("Do not invent timestamps", instruction.text)
+
     def test_replacement_instruction_conflicts_with_focus(self):
         args = argparse.Namespace(
             style="notes",
@@ -141,6 +195,7 @@ class YtScribeTests(unittest.TestCase):
             focus_file=None,
             instruction="Replace everything.",
             prompt_file=None,
+            timestamps=False,
         )
 
         with self.assertRaises(yt_scribe.CliError) as error:
@@ -178,6 +233,111 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "language_not_available")
         self.assertEqual(error.exception.details["requested_languages"], ["de", "fr"])
         self.assertEqual(error.exception.details["available_languages"], ["sv", "en-GB"])
+
+    def test_fetch_transcript_falls_back_to_raw_timedtext_when_api_list_is_blocked(self):
+        def fake_http_get(url, proxy_config=None):
+            if url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ":
+                return (
+                    b'var ytInitialPlayerResponse = {"captions":'
+                    b'{"playerCaptionsTracklistRenderer":{"captionTracks":[{'
+                    b'"name":{"simpleText":"English"},"languageCode":"en",'
+                    b'"baseUrl":"https://example.test/timedtext?v=dQw4w9WgXcQ&lang=en",'
+                    b'"isTranslatable":true'
+                    b"}]}}};"
+                )
+            self.assertIn("fmt=json3", url)
+            self.assertIsNone(proxy_config)
+            return json.dumps(
+                {
+                    "events": [
+                        {
+                            "tStartMs": 1000,
+                            "dDurationMs": 500,
+                            "segs": [{"utf8": "raw"}, {"utf8": " transcript"}],
+                        }
+                    ]
+                }
+            ).encode()
+
+        with patch.object(yt_scribe, "http_get", side_effect=fake_http_get):
+            transcript = yt_scribe.fetch_transcript(
+                "dQw4w9WgXcQ",
+                "en",
+                api=BlockedTranscriptApi(),
+            )
+
+        self.assertEqual(transcript["source"], "youtube_timedtext")
+        self.assertEqual(transcript["text"], "raw transcript")
+        self.assertEqual(transcript["segments"][0]["start"], 1.0)
+        self.assertEqual(transcript["requested_languages"], ["en"])
+
+    def test_fetch_transcript_falls_back_to_raw_timedtext_when_api_fetch_is_blocked(self):
+        def fake_http_get(url, proxy_config=None):
+            if url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ":
+                return (
+                    b'var ytInitialPlayerResponse = {"captions":'
+                    b'{"playerCaptionsTracklistRenderer":{"captionTracks":[{'
+                    b'"name":{"simpleText":"English"},"languageCode":"en",'
+                    b'"baseUrl":"https://example.test/timedtext?v=dQw4w9WgXcQ&lang=en"'
+                    b"}]}}};"
+                )
+            self.assertIsNone(proxy_config)
+            return json.dumps(
+                {
+                    "events": [
+                        {
+                            "tStartMs": 2000,
+                            "dDurationMs": 750,
+                            "segs": [{"utf8": "fallback text"}],
+                        }
+                    ]
+                }
+            ).encode()
+
+        with patch.object(yt_scribe, "http_get", side_effect=fake_http_get):
+            transcript = yt_scribe.fetch_transcript(
+                "dQw4w9WgXcQ",
+                "en",
+                api=FetchBlockedTranscriptApi(),
+            )
+
+        self.assertEqual(transcript["source"], "youtube_timedtext")
+        self.assertEqual(transcript["text"], "fallback text")
+
+    def test_proxy_config_from_args_uses_cli_flags_and_env_fallback(self):
+        args = argparse.Namespace(http_proxy="http://cli-proxy", https_proxy=None)
+
+        with patch.dict(
+            os.environ,
+            {
+                "YT_SCRIBE_HTTP_PROXY": "",
+                "YT_SCRIBE_HTTPS_PROXY": "http://env-proxy",
+            },
+        ):
+            proxy_config = yt_scribe.proxy_config_from_args(args)
+
+        self.assertEqual(
+            proxy_config.to_requests_dict(),
+            {"http": "http://cli-proxy", "https": "http://env-proxy"},
+        )
+
+    def test_http_get_reports_youtube_429_as_ip_block(self):
+        error = urllib.error.HTTPError(
+            url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={},
+            fp=None,
+        )
+
+        with (
+            patch.object(yt_scribe.urllib.request, "urlopen", side_effect=error),
+            self.assertRaises(yt_scribe.CliError) as raised,
+        ):
+            yt_scribe.http_get("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+        self.assertEqual(raised.exception.code, "youtube_ip_blocked")
+        self.assertIn("YT_SCRIBE_HTTPS_PROXY", str(raised.exception))
 
     def test_default_run_output_path_is_human_first_and_unique(self):
         first = yt_scribe.default_run_output_path("dQw4w9WgXcQ", "notes")
@@ -333,6 +493,82 @@ class YtScribeTests(unittest.TestCase):
         self.assertIn("Using Codex", stderr.getvalue())
         self.assertIn("Wrote polished transcript to notes.md", stdout.getvalue())
         self.assertIsNotNone(run_agent.call_args.kwargs["progress"])
+        self.assertEqual(run_agent.call_args.kwargs["transcript_text"], "hello world")
+
+    def test_run_with_timestamps_passes_timestamped_transcript_and_reports_json(self):
+        transcript = {
+            "video_id": "dQw4w9WgXcQ",
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "language": "en",
+            "requested_languages": ["en"],
+            "track": {"language_code": "en"},
+            "segments": [
+                {"start": 1.2, "duration": 0.5, "text": "hello world"},
+                {"start": 62.0, "duration": 0.5, "text": "second point"},
+            ],
+            "text": "hello world\nsecond point",
+        }
+        args = yt_scribe.build_parser().parse_args(
+            ["--json", "run", "dQw4w9WgXcQ", "--stdout", "--timestamps"],
+        )
+        stdout = io.StringIO()
+
+        with (
+            patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+            patch.object(
+                yt_scribe,
+                "run_agent_polish",
+                return_value={
+                    "output_path": None,
+                    "chars": len("polished text\n"),
+                    "harness": "codex",
+                    "text": "polished text\n",
+                },
+            ) as polish,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            polish.call_args.kwargs["transcript_text"],
+            "[00:01] hello world\n[01:02] second point",
+        )
+        self.assertIn("timestamp anchors", polish.call_args.kwargs["instruction"])
+        self.assertTrue(payload["run"]["timestamp_grounding"])
+        self.assertIn("--timestamps", payload["run"]["instruction_sources"])
+
+    def test_polish_with_timestamps_reports_json_and_prompt_contract(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            transcript_path = Path(tmp_dir) / "transcript.txt"
+            transcript_path.write_text("[00:01] hello world\n", encoding="utf-8")
+            args = yt_scribe.build_parser().parse_args(
+                ["--json", "polish", str(transcript_path), "--stdout", "--timestamps"],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.object(
+                    yt_scribe,
+                    "run_agent_polish",
+                    return_value={
+                        "output_path": None,
+                        "chars": len("polished text\n"),
+                        "harness": "codex",
+                        "text": "polished text\n",
+                    },
+                ) as polish,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(polish.call_args.kwargs["transcript_text"], "[00:01] hello world\n")
+        self.assertIn("timestamp anchors", polish.call_args.kwargs["instruction"])
+        self.assertTrue(payload["polish"]["timestamp_grounding"])
 
     def test_run_front_matter_is_written_to_output_file(self):
         transcript = {
@@ -554,7 +790,8 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(payload["run"]["cache"], {"status": "hit", "path": str(cache_path)})
 
     def test_batch_writes_manifest_for_success_and_failure(self):
-        def fake_load_or_fetch(url, languages, cache_dir, resume):
+        def fake_load_or_fetch(url, languages, cache_dir, resume, proxy_config=None):
+            self.assertIsNone(proxy_config)
             if url == "aaaaaaaaaaa":
                 raise yt_scribe.CliError("No caption tracks were found", "no_captions")
             return (

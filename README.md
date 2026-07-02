@@ -387,7 +387,7 @@ The plugin manifest lives in `.codex-plugin/` and points at `.agents/skills/`.
 ## Notes
 
 - A video must have captions available.
-- `youtube-transcript-api` uses an undocumented YouTube web-client API, so YouTube can change or block behavior.
-- If YouTube blocks the IP running the command, the underlying library may raise request-blocking errors. The upstream project documents proxy support for those cases.
+- `youtube-transcript-api` uses an undocumented YouTube web-client API, so YouTube can change or block behavior. If that backend is blocked, `yt-scribe` tries the public timedtext caption track exposed by the watch page.
+- If YouTube blocks the IP running the command, use `--http-proxy` or `--https-proxy`, or set `YT_SCRIBE_HTTP_PROXY` / `YT_SCRIBE_HTTPS_PROXY`. A plain datacenter proxy may still be blocked by YouTube.
 - `yt-scribe` does not bypass private, unavailable, or disabled captions.
 - Long transcripts can be truncated deliberately with `--max-chars`.

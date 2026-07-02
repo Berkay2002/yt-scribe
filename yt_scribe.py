@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig, InvalidProxyConfig
 
 VERSION = "0.1.0"
 COMMAND_NAME = "yt-scribe"
@@ -31,6 +32,8 @@ AGENT_HARNESSES = ("codex", "opencode")
 CONFIG_ENV_VAR = "YT_SCRIBE_CONFIG"
 CONFIG_FILENAME = "config.json"
 AGENTS_SKILLS_DIR_ENV_VAR = "YT_SCRIBE_AGENTS_SKILLS_DIR"
+HTTP_PROXY_ENV_VAR = "YT_SCRIBE_HTTP_PROXY"
+HTTPS_PROXY_ENV_VAR = "YT_SCRIBE_HTTPS_PROXY"
 DEFAULT_CACHE_DIR = Path(".yt-scribe") / "cache"
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 USER_AGENT = (
@@ -352,7 +355,7 @@ class CaptionTrack:
         }
 
 
-def http_get(url: str) -> bytes:
+def http_get(url: str, proxy_config: GenericProxyConfig | None = None) -> bytes:
     request = urllib.request.Request(
         url,
         headers={
@@ -361,9 +364,23 @@ def http_get(url: str) -> bytes:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        if proxy_config:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler(proxy_config.to_requests_dict())
+            )
+            response_context = opener.open(request, timeout=30)
+        else:
+            response_context = urllib.request.urlopen(request, timeout=30)
+        with response_context as response:
             return response.read()
     except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise CliError(
+                "YouTube returned HTTP 429 while fetching caption metadata. "
+                "This usually means the current IP is rate-limited or blocked; "
+                "retry later or use --https-proxy / YT_SCRIBE_HTTPS_PROXY.",
+                "youtube_ip_blocked",
+            ) from exc
         raise CliError(f"HTTP {exc.code} while fetching {url}", "http_error") from exc
     except urllib.error.URLError as exc:
         message = f"Network error while fetching {url}: {exc.reason}"
@@ -450,8 +467,14 @@ def caption_name(track: dict[str, Any]) -> str:
     return str(track.get("languageCode") or "unknown")
 
 
-def fetch_raw_caption_tracks(video_id: str) -> list[CaptionTrack]:
-    page = http_get(canonical_watch_url(video_id)).decode("utf-8", errors="replace")
+def fetch_raw_caption_tracks(
+    video_id: str,
+    proxy_config: GenericProxyConfig | None = None,
+) -> list[CaptionTrack]:
+    page = http_get(canonical_watch_url(video_id), proxy_config).decode(
+        "utf-8",
+        errors="replace",
+    )
     player = extract_json_object(page, "ytInitialPlayerResponse")
     renderer = player.get("captions", {}).get("playerCaptionsTracklistRenderer", {})
     raw_tracks = renderer.get("captionTracks") or []
@@ -474,8 +497,9 @@ def fetch_raw_caption_tracks(video_id: str) -> list[CaptionTrack]:
 def list_transcript_tracks(
     video_id: str,
     api: YouTubeTranscriptApi | None = None,
+    proxy_config: GenericProxyConfig | None = None,
 ) -> list[CaptionTrack]:
-    api = api or YouTubeTranscriptApi()
+    api = api or YouTubeTranscriptApi(proxy_config=proxy_config)
     try:
         transcript_list = api.list(video_id)
     except Exception as exc:
@@ -611,32 +635,25 @@ def parse_xml_caption(payload: bytes) -> list[dict[str, Any]]:
     return segments
 
 
-def fetch_transcript(
-    url_or_id: str,
-    lang: str | list[str],
-    api: YouTubeTranscriptApi | None = None,
-) -> dict[str, Any]:
-    video_id = extract_video_id(url_or_id)
-    api = api or YouTubeTranscriptApi()
-    tracks = list_transcript_tracks(video_id, api)
-    track, languages = choose_track_from_languages(tracks, lang)
-
+def fetch_timedtext_segments(
+    track: CaptionTrack,
+    proxy_config: GenericProxyConfig | None = None,
+) -> list[dict[str, Any]]:
     try:
-        fetched = api.fetch(video_id, languages=[track.language_code])
-    except Exception as exc:
-        message = f"Could not fetch captions for this video: {exc}"
-        raise CliError(message, "caption_fetch_failed") from exc
+        payload = http_get(timedtext_url(track, "json3"), proxy_config)
+        return parse_json3_caption(payload)
+    except (CliError, json.JSONDecodeError, TypeError, ValueError):
+        payload = http_get(timedtext_url(track, "srv3"), proxy_config)
+        return parse_xml_caption(payload)
 
-    segments = [
-        {
-            "start": round(float(item.start), 3),
-            "duration": round(float(item.duration), 3),
-            "text": str(item.text).replace("\n", " ").strip(),
-        }
-        for item in fetched
-        if str(item.text).strip()
-    ]
 
+def transcript_payload(
+    video_id: str,
+    track: CaptionTrack,
+    languages: list[str],
+    segments: list[dict[str, Any]],
+    source: str,
+) -> dict[str, Any]:
     text = "\n".join(segment["text"] for segment in segments)
     if not text.strip():
         raise CliError(
@@ -652,8 +669,56 @@ def fetch_transcript(
         "track": track.public_dict(),
         "segments": segments,
         "text": text,
-        "source": "youtube_transcript_api",
+        "source": source,
     }
+
+
+def fetch_raw_transcript(
+    video_id: str,
+    lang: str | list[str],
+    proxy_config: GenericProxyConfig | None = None,
+) -> dict[str, Any]:
+    tracks = fetch_raw_caption_tracks(video_id, proxy_config)
+    track, languages = choose_track_from_languages(tracks, lang)
+    segments = fetch_timedtext_segments(track, proxy_config)
+    return transcript_payload(video_id, track, languages, segments, "youtube_timedtext")
+
+
+def fetch_transcript(
+    url_or_id: str,
+    lang: str | list[str],
+    api: YouTubeTranscriptApi | None = None,
+    proxy_config: GenericProxyConfig | None = None,
+) -> dict[str, Any]:
+    video_id = extract_video_id(url_or_id)
+    api = api or YouTubeTranscriptApi(proxy_config=proxy_config)
+    try:
+        tracks = list_transcript_tracks(video_id, api, proxy_config)
+    except CliError:
+        return fetch_raw_transcript(video_id, lang, proxy_config)
+
+    track, languages = choose_track_from_languages(tracks, lang)
+
+    try:
+        fetched = api.fetch(video_id, languages=[track.language_code])
+    except Exception as exc:
+        try:
+            return fetch_raw_transcript(video_id, lang, proxy_config)
+        except CliError:
+            message = f"Could not fetch captions for this video: {exc}"
+            raise CliError(message, "caption_fetch_failed") from exc
+
+    segments = [
+        {
+            "start": round(float(item.start), 3),
+            "duration": round(float(item.duration), 3),
+            "text": str(item.text).replace("\n", " ").strip(),
+        }
+        for item in fetched
+        if str(item.text).strip()
+    ]
+
+    return transcript_payload(video_id, track, languages, segments, "youtube_transcript_api")
 
 
 def srt_timestamp(seconds: float) -> str:
@@ -687,6 +752,17 @@ def cache_dir_from_args(args: argparse.Namespace) -> Path | None:
     return None
 
 
+def proxy_config_from_args(args: argparse.Namespace) -> GenericProxyConfig | None:
+    http_proxy = getattr(args, "http_proxy", None) or os.environ.get(HTTP_PROXY_ENV_VAR)
+    https_proxy = getattr(args, "https_proxy", None) or os.environ.get(HTTPS_PROXY_ENV_VAR)
+    if not http_proxy and not https_proxy:
+        return None
+    try:
+        return GenericProxyConfig(http_url=http_proxy, https_url=https_proxy)
+    except InvalidProxyConfig as exc:
+        raise CliError(str(exc), "invalid_proxy_config") from exc
+
+
 def transcript_cache_path(cache_dir: Path, video_id: str, language: str) -> Path:
     safe_language = re.sub(r"[^A-Za-z0-9_.-]+", "_", language)
     return cache_dir / f"{video_id}-{safe_language}.json"
@@ -718,6 +794,7 @@ def load_or_fetch_transcript(
     languages: list[str],
     cache_dir: Path | None,
     resume: bool,
+    proxy_config: GenericProxyConfig | None = None,
 ) -> tuple[dict[str, Any], dict[str, str | None]]:
     video_id = extract_video_id(url_or_id)
     if cache_dir and resume:
@@ -726,7 +803,7 @@ def load_or_fetch_transcript(
             transcript, path = cached
             return transcript, {"status": "hit", "path": str(path)}
 
-    transcript = fetch_transcript(url_or_id, languages)
+    transcript = fetch_transcript(url_or_id, languages, proxy_config=proxy_config)
     if cache_dir:
         path = write_transcript_cache(cache_dir, transcript)
         status = "written" if not resume else "miss_written"
@@ -1492,7 +1569,11 @@ def handle_args(args: argparse.Namespace) -> int:
 
     if args.command == "inspect":
         video_id = extract_video_id(args.url)
-        tracks = list_transcript_tracks(video_id)
+        proxy_config = proxy_config_from_args(args)
+        try:
+            tracks = list_transcript_tracks(video_id, proxy_config=proxy_config)
+        except CliError:
+            tracks = fetch_raw_caption_tracks(video_id, proxy_config)
         payload = {
             "ok": True,
             "video": {
@@ -1519,6 +1600,7 @@ def handle_args(args: argparse.Namespace) -> int:
             requested_languages(args),
             cache_dir_from_args(args),
             args.resume,
+            proxy_config_from_args(args),
         )
         rendered = render_transcript(transcript, args.format)
         output_path = write_text(args.out, rendered)
@@ -1596,6 +1678,7 @@ def handle_args(args: argparse.Namespace) -> int:
             requested_languages(args),
             cache_dir_from_args(args),
             args.resume,
+            proxy_config_from_args(args),
         )
         segment_count = len(transcript["segments"])
         segment_word = "segment" if segment_count == 1 else "segments"
@@ -1672,6 +1755,7 @@ def handle_args(args: argparse.Namespace) -> int:
         items: list[dict[str, Any]] = []
         languages = requested_languages(args)
         cache_dir = cache_dir_from_args(args)
+        proxy_config = proxy_config_from_args(args)
         harness = selected_agent_harness(args)
         instruction = resolve_instruction(args, harness)
 
@@ -1697,6 +1781,7 @@ def handle_args(args: argparse.Namespace) -> int:
                     languages,
                     cache_dir,
                     args.resume,
+                    proxy_config,
                 )
                 output_path = batch_output_path(out_dir, transcript["video_id"], args.style)
                 result = run_agent_polish(
@@ -1765,11 +1850,12 @@ def handle_args(args: argparse.Namespace) -> int:
 
     if args.command == "raw":
         video_id = extract_video_id(args.url)
-        tracks = fetch_raw_caption_tracks(video_id)
+        proxy_config = proxy_config_from_args(args)
+        tracks = fetch_raw_caption_tracks(video_id, proxy_config)
         track = choose_track(tracks, args.lang)
         url = timedtext_url(track, args.format)
         if args.body:
-            body = http_get(url).decode("utf-8", errors="replace")
+            body = http_get(url, proxy_config).decode("utf-8", errors="replace")
             emit({"ok": True, "body": body}, args.json, body)
             return 0
         payload = {
@@ -1839,6 +1925,17 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_proxy_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--http-proxy",
+        help=f"advanced: HTTP proxy URL for YouTube requests; env: {HTTP_PROXY_ENV_VAR}",
+    )
+    parser.add_argument(
+        "--https-proxy",
+        help=f"advanced: HTTPS proxy URL for YouTube requests; env: {HTTPS_PROXY_ENV_VAR}",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     epilog = """lifecycle:
   1. yt-scribe doctor
@@ -1893,6 +1990,7 @@ ai contract:
         help="resolve a video and list caption tracks",
     )
     inspect_parser.add_argument("url", help="YouTube URL or 11-character video ID")
+    add_proxy_flags(inspect_parser)
 
     fetch_parser = subparsers.add_parser("fetch", help="download the transcript without an agent")
     fetch_parser.add_argument("url", help="YouTube URL or 11-character video ID")
@@ -1909,6 +2007,7 @@ ai contract:
     )
     fetch_parser.add_argument("--format", choices=["text", "json", "srt"], default="text")
     fetch_parser.add_argument("--out", help="write transcript to this file")
+    add_proxy_flags(fetch_parser)
 
     polish_parser = subparsers.add_parser(
         "polish",
@@ -1944,6 +2043,7 @@ ai contract:
         action="store_true",
         help="prepend factual YAML front matter to polished markdown output",
     )
+    add_proxy_flags(run_parser)
     add_polish_flags(run_parser)
 
     batch_parser = subparsers.add_parser(
@@ -1969,12 +2069,14 @@ ai contract:
         action="store_true",
         help="prepend factual YAML front matter to polished markdown output",
     )
+    add_proxy_flags(batch_parser)
     add_polish_flags(batch_parser)
 
     raw_parser = subparsers.add_parser("raw", help="read-only timedtext escape hatch")
     raw_parser.add_argument("url", help="YouTube URL or 11-character video ID")
     raw_parser.add_argument("--lang", default="en")
     raw_parser.add_argument("--format", choices=["json3", "srv3"], default="json3")
+    add_proxy_flags(raw_parser)
     raw_parser.add_argument(
         "--body",
         action="store_true",
