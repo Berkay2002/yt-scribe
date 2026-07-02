@@ -1544,6 +1544,118 @@ class YtScribeTests(unittest.TestCase):
 
         self.assertEqual(names, ["same-talk-dQw4w9WgXcQ", "same-talk-dQw4w9WgXcQ-2"])
 
+    def test_deep_run_writes_bundle_artifacts_and_chunk_manifest(self):
+        transcript = {
+            **self.sample_transcript(),
+            "segments": [
+                {"start": 0.0, "duration": 120.0, "text": "intro"},
+                {"start": 120.0, "duration": 120.0, "text": "background"},
+                {"start": 240.0, "duration": 120.0, "text": "design"},
+                {"start": 360.0, "duration": 120.0, "text": "tradeoffs"},
+                {"start": 480.0, "duration": 120.0, "text": "demo"},
+                {"start": 600.0, "duration": 120.0, "text": "wrap"},
+            ],
+            "text": "intro\nbackground\ndesign\ntradeoffs\ndemo\nwrap",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "run",
+                    "dQw4w9WgXcQ",
+                    "--workflow",
+                    "deep",
+                    "--bundle-dir",
+                    str(bundle_dir),
+                ],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.object(yt_scribe, "fetch_video_title", return_value="Chunk Planning Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(
+                    yt_scribe,
+                    "run_agent_polish",
+                    side_effect=lambda **kwargs: {
+                        "output_path": yt_scribe.write_text(kwargs["out_path"], "polished\n"),
+                        "chars": len("polished\n"),
+                        "harness": "codex",
+                        "text": "polished\n",
+                    },
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            payload = json.loads(stdout.getvalue())
+            transcript_json = json.loads((bundle_dir / "transcript.json").read_text())
+            transcript_text = (bundle_dir / "transcript.txt").read_text(encoding="utf-8")
+            manifest = json.loads((bundle_dir / "chunk-manifest.json").read_text())
+            metadata = json.loads((bundle_dir / "metadata.json").read_text())
+            verification = json.loads((bundle_dir / "structural-verification.json").read_text())
+            chunk_file_exists = (bundle_dir / "chunks" / "chunk-001.txt").is_file()
+
+        self.assertEqual(transcript_json, transcript)
+        self.assertIn("[00:00] intro", transcript_text)
+        self.assertIn("[10:00] wrap", transcript_text)
+        self.assertEqual(
+            payload["run"]["bundle"]["transcript_json"],
+            str(bundle_dir / "transcript.json"),
+        )
+        self.assertTrue(chunk_file_exists)
+        self.assertEqual(manifest["chunks"][0]["id"], "chunk-001")
+        self.assertEqual(manifest["chunks"][0]["source_segments"], {"start": 0, "end": 5})
+        self.assertTrue(manifest["chunks"][0]["text_path"].endswith("chunk-001.txt"))
+        self.assertTrue(manifest["chunks"][0]["note_path"].endswith("chunk-001-notes.md"))
+        self.assertEqual(metadata["title"], "Chunk Planning Talk")
+        self.assertEqual(metadata["bundle_status"], "planned")
+        self.assertTrue(verification["ok"])
+        self.assertEqual(verification["missing"], [])
+
+    def test_deep_chunk_plan_uses_overlap_and_segment_boundaries(self):
+        transcript = {
+            "segments": [
+                {"start": 0.0, "duration": 60.0, "text": "a"},
+                {"start": 60.0, "duration": 60.0, "text": "b"},
+                {"start": 120.0, "duration": 60.0, "text": "c"},
+                {"start": 180.0, "duration": 60.0, "text": "d"},
+            ]
+        }
+
+        chunks = yt_scribe.plan_deep_chunks(
+            transcript,
+            target_seconds=180,
+            max_chars=10_000,
+            overlap_seconds=60,
+        )
+
+        self.assertEqual(
+            [chunk["source_segments"] for chunk in chunks],
+            [{"start": 0, "end": 3}, {"start": 2, "end": 4}],
+        )
+        self.assertEqual(chunks[1]["start_seconds"], 120.0)
+
+    def test_deep_chunk_plan_keeps_dense_segment_whole(self):
+        transcript = {
+            "segments": [
+                {"start": 0.0, "duration": 30.0, "text": "x" * 100},
+                {"start": 30.0, "duration": 30.0, "text": "after"},
+            ]
+        }
+
+        chunks = yt_scribe.plan_deep_chunks(
+            transcript,
+            target_seconds=30,
+            max_chars=10,
+            overlap_seconds=5,
+        )
+
+        self.assertEqual(chunks[0]["source_segments"], {"start": 0, "end": 1})
+        self.assertIn("x" * 100, chunks[0]["text"])
+
     def test_rename_custom_bundle_does_not_move_user_bundle_directory(self):
         transcript = self.sample_transcript()
 

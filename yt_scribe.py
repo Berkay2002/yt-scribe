@@ -41,6 +41,9 @@ PROJECT_CONFIG = Path(".yt-scribe") / CONFIG_FILENAME
 RUN_REGISTRY_FILENAME = "registry.json"
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 DEEP_WORKFLOW_DURATION_THRESHOLD_SECONDS = 45 * 60
+DEEP_CHUNK_TARGET_SECONDS = 10 * 60
+DEEP_CHUNK_OVERLAP_SECONDS = 45
+DEEP_CHUNK_MAX_CHARS = 15_000
 RUN_WORKFLOWS = ("auto", "quick", "deep")
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1563,8 +1566,12 @@ def bundle_paths(bundle_dir: str | None) -> dict[str, str] | None:
     return {
         "dir": str(root),
         "transcript": str(root / "transcript.txt"),
+        "transcript_json": str(root / "transcript.json"),
+        "chunks_dir": str(root / "chunks"),
+        "chunk_manifest": str(root / "chunk-manifest.json"),
         "polished": str(root / "polished.md"),
         "metadata": str(root / "metadata.json"),
+        "structural_verification": str(root / "structural-verification.json"),
     }
 
 
@@ -1573,6 +1580,208 @@ def write_bundle_metadata(path: str, data: dict[str, Any]) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(target)
+
+
+def segment_start(segment: dict[str, Any]) -> float:
+    return float(segment.get("start") or 0)
+
+
+def segment_end(segment: dict[str, Any]) -> float:
+    return segment_start(segment) + float(segment.get("duration") or 0)
+
+
+def transcript_segment_line(segment: dict[str, Any]) -> str:
+    return f"[{timestamp_anchor(segment_start(segment))}] {str(segment.get('text') or '').strip()}"
+
+
+def plan_deep_chunks(
+    transcript: dict[str, Any],
+    *,
+    target_seconds: int = DEEP_CHUNK_TARGET_SECONDS,
+    max_chars: int = DEEP_CHUNK_MAX_CHARS,
+    overlap_seconds: int = DEEP_CHUNK_OVERLAP_SECONDS,
+) -> list[dict[str, Any]]:
+    indexed_segments = [
+        (index, segment)
+        for index, segment in enumerate(transcript.get("segments") or [])
+        if str(segment.get("text") or "").strip()
+    ]
+    if not indexed_segments:
+        return []
+
+    chunks: list[dict[str, Any]] = []
+    start = 0
+    while start < len(indexed_segments):
+        end = start
+        lines: list[str] = []
+        char_count = 0
+        chunk_start = segment_start(indexed_segments[start][1])
+        while end < len(indexed_segments):
+            _, segment = indexed_segments[end]
+            line = transcript_segment_line(segment)
+            projected_chars = char_count + len(line) + (1 if lines else 0)
+            projected_span = segment_end(segment) - chunk_start
+            if end > start and (
+                projected_span > target_seconds or projected_chars > max_chars
+            ):
+                break
+            lines.append(line)
+            char_count = projected_chars
+            end += 1
+
+        if end <= start:
+            _, segment = indexed_segments[start]
+            lines = [transcript_segment_line(segment)]
+            end = start + 1
+
+        chunk_segments = indexed_segments[start:end]
+        first_source_index = chunk_segments[0][0]
+        last_source_index = chunk_segments[-1][0]
+        start_seconds = segment_start(chunk_segments[0][1])
+        end_seconds = segment_end(chunk_segments[-1][1])
+        chunk_id = f"chunk-{len(chunks) + 1:03}"
+        chunks.append(
+            {
+                "id": chunk_id,
+                "index": len(chunks) + 1,
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
+                "start": timestamp_anchor(start_seconds),
+                "end": timestamp_anchor(end_seconds),
+                "source_segments": {
+                    "start": first_source_index,
+                    "end": last_source_index + 1,
+                },
+                "chars": len("\n".join(lines)),
+                "text": "\n".join(lines),
+            }
+        )
+
+        if end >= len(indexed_segments):
+            break
+
+        overlap_threshold = max(chunk_start, end_seconds - overlap_seconds)
+        next_start = end
+        for candidate in range(start + 1, end):
+            if segment_end(indexed_segments[candidate][1]) > overlap_threshold:
+                next_start = candidate
+                break
+        start = next_start
+
+    return chunks
+
+
+def write_json_file(path: str | Path, data: Any) -> str:
+    target = Path(path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(target)
+
+
+def write_deep_bundle_plan(
+    transcript: dict[str, Any],
+    bundle: dict[str, str],
+    *,
+    workflow: dict[str, int | str | None],
+    harness: str,
+    title: str | None,
+    managed_run: dict[str, Any] | None,
+) -> dict[str, Any]:
+    root = Path(bundle["dir"])
+    chunks_dir = Path(bundle["chunks_dir"])
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    transcript_json_path = write_json_file(bundle["transcript_json"], transcript)
+    timestamped_transcript = render_timestamped_transcript(transcript) + "\n"
+    transcript_text_path = write_text(bundle["transcript"], timestamped_transcript)
+    chunks = plan_deep_chunks(transcript)
+    manifest_chunks = []
+    for chunk in chunks:
+        text_path = chunks_dir / f"{chunk['id']}.txt"
+        note_path = chunks_dir / f"{chunk['id']}-notes.md"
+        write_text(str(text_path), chunk["text"] + "\n")
+        manifest_chunks.append(
+            {
+                key: value
+                for key, value in chunk.items()
+                if key != "text"
+            }
+            | {
+                "text_path": str(text_path.resolve()),
+                "note_path": str(note_path.resolve()),
+            }
+        )
+
+    manifest = {
+        "version": 1,
+        "video_id": transcript["video_id"],
+        "url": transcript["url"],
+        "chunking": {
+            "target_seconds": DEEP_CHUNK_TARGET_SECONDS,
+            "overlap_seconds": DEEP_CHUNK_OVERLAP_SECONDS,
+            "max_chars": DEEP_CHUNK_MAX_CHARS,
+        },
+        "chunks": manifest_chunks,
+    }
+    manifest_path = write_json_file(bundle["chunk_manifest"], manifest)
+    metadata = {
+        "video_id": transcript["video_id"],
+        "url": transcript["url"],
+        "title": title,
+        **workflow,
+        "language": transcript["language"],
+        "requested_languages": transcript.get("requested_languages"),
+        "track": transcript.get("track"),
+        "agent_harness": harness,
+        "bundle_status": "planned",
+        "managed_run": managed_run,
+        "artifacts": {
+            "transcript_json": transcript_json_path,
+            "transcript": transcript_text_path,
+            "chunk_manifest": manifest_path,
+            "structural_verification": str(Path(bundle["structural_verification"]).resolve()),
+            "chunks_dir": str(chunks_dir.resolve()),
+        },
+    }
+    metadata_path = write_bundle_metadata(bundle["metadata"], metadata)
+    verification = verify_deep_bundle_structure(bundle, manifest)
+    verification_path = write_json_file(bundle["structural_verification"], verification)
+    return {
+        "dir": str(root),
+        "transcript": transcript_text_path,
+        "transcript_json": transcript_json_path,
+        "chunk_manifest": manifest_path,
+        "structural_verification": verification_path,
+        "chunks_dir": str(chunks_dir.resolve()),
+        "metadata": metadata_path,
+        "manifest": manifest,
+        "verification": verification,
+    }
+
+
+def verify_deep_bundle_structure(
+    bundle: dict[str, str],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    required = [
+        bundle["transcript_json"],
+        bundle["transcript"],
+        bundle["chunk_manifest"],
+        bundle["metadata"],
+    ]
+    for chunk in manifest.get("chunks", []):
+        required.append(str(chunk["text_path"]))
+    missing = [
+        str(Path(path).expanduser().resolve())
+        for path in required
+        if not Path(path).expanduser().is_file()
+    ]
+    return {
+        "ok": not missing,
+        "missing": missing,
+        "checked_at": utc_timestamp(),
+        "chunks": len(manifest.get("chunks") or []),
+    }
 
 
 def data_dir(path: str | Path | None = None) -> Path:
@@ -3321,12 +3530,14 @@ def handle_args(args: argparse.Namespace) -> int:
         )
         harness = selected_agent_harness(args)
         managed_run = None
+        run_title = None
         bundle_dir = args.bundle_dir
         if workflow["workflow"] == "deep":
+            run_title = fetch_video_title(video_id, proxy_config)
             managed_run = run_record_for_deep_workflow(
                 video_id=transcript["video_id"],
                 source_url=transcript["url"],
-                title=fetch_video_title(video_id, proxy_config),
+                title=run_title,
                 workflow=str(workflow["workflow"]),
                 harness=harness,
                 bundle_dir=args.bundle_dir,
@@ -3334,9 +3545,24 @@ def handle_args(args: argparse.Namespace) -> int:
             bundle_dir = str(managed_run["bundle_path"])
             progress.message(f"Managed run: {managed_run['name']}")
         bundle = bundle_paths(bundle_dir)
-        transcript_target = args.transcript or (bundle["transcript"] if bundle else None)
-        rendered = render_transcript(transcript, args.transcript_format)
-        transcript_path = write_text(transcript_target, rendered)
+        deep_bundle = None
+        if bundle and workflow["workflow"] == "deep":
+            deep_bundle = write_deep_bundle_plan(
+                transcript,
+                bundle,
+                workflow=workflow,
+                harness=harness,
+                title=run_title,
+                managed_run=managed_run,
+            )
+            transcript_path = deep_bundle["transcript"]
+            if args.transcript:
+                rendered = render_transcript(transcript, args.transcript_format)
+                write_text(args.transcript, rendered)
+        else:
+            transcript_target = args.transcript or (bundle["transcript"] if bundle else None)
+            rendered = render_transcript(transcript, args.transcript_format)
+            transcript_path = write_text(transcript_target, rendered)
         if transcript_path:
             progress.message(f"Wrote raw transcript to {transcript_path}")
         transcript_text = (
@@ -3424,45 +3650,64 @@ def handle_args(args: argparse.Namespace) -> int:
             },
         }
         if bundle:
+            records = {
+                "manifest": None,
+                "verification": None,
+            }
+            if deep_bundle:
+                records = {
+                    "chunk_manifest": deep_bundle["chunk_manifest"],
+                    "structural_verification": deep_bundle["structural_verification"],
+                    "manifest": None,
+                    "verification": None,
+                }
             metadata_path = write_bundle_metadata(
                 bundle["metadata"],
                 {
                     "video_id": transcript["video_id"],
                     "url": transcript["url"],
+                    "title": run_title,
                     **workflow,
                     "language": transcript["language"],
                     "requested_languages": transcript.get(
                         "requested_languages",
                         requested_languages(args),
                     ),
+                    "track": transcript.get("track"),
                     "style": args.style,
                     "template": args.template,
                     "instruction_mode": instruction.mode,
                     "instruction_sources": instruction.sources,
                     "timestamp_grounding": args.timestamps,
                     "agent_harness": result["harness"],
+                    "bundle_status": "planned" if deep_bundle else "completed",
                     "transcript_path": transcript_path,
+                    "transcript_json_path": deep_bundle["transcript_json"] if deep_bundle else None,
+                    "chunk_manifest_path": deep_bundle["chunk_manifest"] if deep_bundle else None,
+                    "structural_verification_path": (
+                        deep_bundle["structural_verification"] if deep_bundle else None
+                    ),
                     "output_path": result["output_path"],
                     "front_matter_enabled": args.front_matter,
                     "front_matter_data": front_matter_data,
                     "chunking": result["chunking"],
                     "cache": cache,
                     "managed_run": managed_run,
-                    "records": {
-                        "manifest": None,
-                        "verification": None,
-                    },
+                    "records": records,
                 },
             )
             payload["run"]["bundle"] = {
                 "dir": bundle["dir"],
                 "transcript": transcript_path,
+                "transcript_json": deep_bundle["transcript_json"] if deep_bundle else None,
+                "chunks_dir": deep_bundle["chunks_dir"] if deep_bundle else None,
+                "chunk_manifest": deep_bundle["chunk_manifest"] if deep_bundle else None,
+                "structural_verification": (
+                    deep_bundle["structural_verification"] if deep_bundle else None
+                ),
                 "polished": result["output_path"],
                 "metadata": metadata_path,
-                "records": {
-                    "manifest": None,
-                    "verification": None,
-                },
+                "records": records,
             }
         if args.json:
             emit(payload, True)
