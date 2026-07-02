@@ -15,6 +15,18 @@ Use it yourself from the terminal, or let Codex use it as an agent tool.
 
 It uses public YouTube caption tracks when they are available through `youtube-transcript-api`. It does not download video or audio. Polishing is done locally through Codex by default, and can use OpenCode when selected.
 
+## Contents
+
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Lifecycle](#lifecycle)
+- [Commands](#commands)
+- [AI-Friendly JSON](#ai-friendly-json)
+- [Agent Harnesses](#agent-harnesses)
+- [Plugin Skills](#plugin-skills)
+- [Notes](#notes)
+- [Advanced usage](#advanced-usage)
+
 ## Install
 
 Install from GitHub and set up the agent support files:
@@ -244,6 +256,52 @@ Read-only diagnostic escape hatch for inspecting the selected YouTube timedtext 
 yt-scribe raw "<url>" --lang en
 ```
 
+## Advanced Usage
+
+These are opt-in workflow features for larger note-taking runs, repeated ingestion,
+and agent automation. The normal `yt-scribe run "<url>"` path does not require them.
+
+- `--langs`: ordered caption language fallback.
+- `--front-matter`: factual metadata at the top of polished markdown.
+- `--cache-dir` and `--resume`: explicit transcript cache reuse.
+- `batch`: process a plain text URL list and write a manifest.
+
+<details>
+<summary>Examples for power users and agent workflows</summary>
+
+Use ordered language fallback when caption languages vary across videos:
+
+```sh
+yt-scribe fetch "<youtube-url>" --langs en,en-US,en-GB,sv --out transcript.txt
+yt-scribe run "<youtube-url>" --langs en,en-US,en-GB,sv
+```
+
+Add factual front matter to polished markdown when the output will be indexed,
+cited, or processed by another tool:
+
+```sh
+yt-scribe run "<youtube-url>" --front-matter --out notes.md
+```
+
+Use an explicit transcript cache when rerunning the same videos or recovering from
+interrupted polish work:
+
+```sh
+yt-scribe fetch "<youtube-url>" --cache-dir .yt-scribe/cache --out transcript.txt
+yt-scribe run "<youtube-url>" --resume --cache-dir .yt-scribe/cache --out notes.md
+```
+
+Process a plain text URL list and write a manifest for partial success tracking:
+
+```sh
+yt-scribe batch videos.txt --out-dir notes --manifest notes/manifest.json --resume
+```
+
+Batch input is one YouTube URL or video ID per line. Blank lines and lines starting
+with `#` are ignored. The manifest records succeeded, failed, and skipped items.
+
+</details>
+
 ## AI-Friendly JSON
 
 Put `--json` before the command:
@@ -333,39 +391,3 @@ The plugin manifest lives in `.codex-plugin/` and points at `.agents/skills/`.
 - If YouTube blocks the IP running the command, the underlying library may raise request-blocking errors. The upstream project documents proxy support for those cases.
 - `yt-scribe` does not bypass private, unavailable, or disabled captions.
 - Long transcripts can be truncated deliberately with `--max-chars`.
-
-<details>
-<summary>Advanced usage for power users and agent workflows</summary>
-
-Use ordered language fallback when caption languages vary across videos:
-
-```sh
-yt-scribe fetch "<youtube-url>" --langs en,en-US,en-GB,sv --out transcript.txt
-yt-scribe run "<youtube-url>" --langs en,en-US,en-GB,sv
-```
-
-Add factual front matter to polished markdown when the output will be indexed,
-cited, or processed by another tool:
-
-```sh
-yt-scribe run "<youtube-url>" --front-matter --out notes.md
-```
-
-Use an explicit transcript cache when rerunning the same videos or recovering from
-interrupted polish work:
-
-```sh
-yt-scribe fetch "<youtube-url>" --cache-dir .yt-scribe/cache --out transcript.txt
-yt-scribe run "<youtube-url>" --resume --cache-dir .yt-scribe/cache --out notes.md
-```
-
-Process a plain text URL list and write a manifest for partial success tracking:
-
-```sh
-yt-scribe batch videos.txt --out-dir notes --manifest notes/manifest.json --resume
-```
-
-Batch input is one YouTube URL or video ID per line. Blank lines and lines starting
-with `#` are ignored. The manifest records succeeded, failed, and skipped items.
-
-</details>
