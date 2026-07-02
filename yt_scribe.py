@@ -1784,6 +1784,174 @@ def verify_deep_bundle_structure(
     }
 
 
+def read_json_file(path: str | Path) -> Any:
+    return json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+
+
+def update_deep_engine_metadata(
+    bundle: dict[str, str],
+    *,
+    status: str,
+    harness: str,
+    chunk_results: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    resumed_chunks: int,
+    merge_status: str,
+    output_path: str | None = None,
+) -> dict[str, Any]:
+    metadata = read_json_file(bundle["metadata"])
+    metadata["bundle_status"] = "completed" if status == "completed" else "incomplete"
+    metadata["engine"] = {
+        "name": "managed_fallback",
+        "status": status,
+        "harness": harness,
+        "chunk_results": chunk_results,
+        "failures": failures,
+        "resumed_chunks": resumed_chunks,
+        "merge_status": merge_status,
+        "output_path": output_path,
+        "updated_at": utc_timestamp(),
+    }
+    write_bundle_metadata(bundle["metadata"], metadata)
+    return metadata
+
+
+def deep_chunk_instruction(base_instruction: str, chunk: dict[str, Any]) -> str:
+    return (
+        f"{base_instruction}\n\n"
+        "Deep workflow chunk mode:\n"
+        f"- Process only {chunk['id']} covering {chunk['start']} to {chunk['end']}.\n"
+        "- Produce detailed notes for this chunk.\n"
+        "- Preserve timestamp anchors that support important claims.\n"
+        "- Do not infer from missing chunks."
+    )
+
+
+def deep_merge_input(notes: list[tuple[str, str]]) -> str:
+    return "\n\n".join(f"## {chunk_id}\n\n{text.strip()}" for chunk_id, text in notes)
+
+
+def run_deep_fallback_engine(
+    *,
+    bundle: dict[str, str],
+    instruction: str,
+    out_path: str,
+    model: str | None,
+    cwd: str | None,
+    harness: str,
+    resume: bool,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
+    manifest = read_json_file(bundle["chunk_manifest"])
+    chunk_results: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    notes: list[tuple[str, str]] = []
+    resumed_chunks = 0
+
+    for chunk in manifest.get("chunks", []):
+        chunk_id = str(chunk["id"])
+        text_path = Path(chunk["text_path"])
+        note_path = Path(chunk["note_path"])
+        if resume and note_path.is_file() and note_path.read_text(encoding="utf-8").strip():
+            notes.append((chunk_id, note_path.read_text(encoding="utf-8")))
+            resumed_chunks += 1
+            chunk_results.append(
+                {
+                    "chunk_id": chunk_id,
+                    "status": "skipped",
+                    "note_path": str(note_path),
+                    "reason": "resume_existing_note",
+                }
+            )
+            continue
+
+        if progress:
+            progress.message(f"Deep chunk {chunk_id}: running {harness_label(harness)}")
+        try:
+            result = run_agent_polish(
+                transcript_text=text_path.read_text(encoding="utf-8"),
+                instruction=deep_chunk_instruction(instruction, chunk),
+                out_path=str(note_path),
+                model=model,
+                cwd=cwd,
+                harness=harness,
+                progress=progress,
+            )
+        except CliError as exc:
+            failure = {
+                "chunk_id": chunk_id,
+                "code": exc.code,
+                "message": str(exc),
+                "note_path": str(note_path),
+            }
+            failures.append(failure)
+            chunk_results.append({"chunk_id": chunk_id, "status": "failed", **failure})
+            continue
+
+        notes.append((chunk_id, result["text"]))
+        chunk_results.append(
+            {
+                "chunk_id": chunk_id,
+                "status": "succeeded",
+                "note_path": result["output_path"],
+                "chars": result["chars"],
+            }
+        )
+
+    if failures:
+        update_deep_engine_metadata(
+            bundle,
+            status="incomplete",
+            harness=harness,
+            chunk_results=chunk_results,
+            failures=failures,
+            resumed_chunks=resumed_chunks,
+            merge_status="skipped",
+        )
+        raise CliError(
+            "Deep run incomplete; retry with --resume after fixing the failed chunks",
+            "deep_run_incomplete",
+            {
+                "failed_chunks": failures,
+                "resume_command": (
+                    f'{COMMAND_NAME} run "<youtube-url>" --workflow deep '
+                    f'--bundle-dir "{bundle["dir"]}" --resume'
+                ),
+            },
+        )
+
+    merge_result = run_agent_polish(
+        transcript_text=deep_merge_input(notes),
+        instruction=merge_chunk_instruction(instruction),
+        out_path=out_path,
+        model=model,
+        cwd=cwd,
+        harness=harness,
+        progress=progress,
+    )
+    update_deep_engine_metadata(
+        bundle,
+        status="completed",
+        harness=merge_result["harness"],
+        chunk_results=chunk_results,
+        failures=[],
+        resumed_chunks=resumed_chunks,
+        merge_status="merged",
+        output_path=merge_result["output_path"],
+    )
+    merge_result["chunking"] = {
+        "enabled": True,
+        "engine": "managed_fallback",
+        "chunk_chars": DEEP_CHUNK_MAX_CHARS,
+        "chunks": len(manifest.get("chunks") or []),
+        "merge_status": "merged",
+        "chunk_artifact_dir": bundle["chunks_dir"],
+        "resumed_chunks": resumed_chunks,
+    }
+    merge_result["bundle_status"] = "completed"
+    return merge_result
+
+
 def data_dir(path: str | Path | None = None) -> Path:
     if path is not None:
         return Path(path).expanduser().resolve()
@@ -3581,7 +3749,24 @@ def handle_args(args: argparse.Namespace) -> int:
         )
         instruction = resolve_instruction(args, harness)
         progress.message(f"Using {harness_label(harness)}")
-        if args.chunk_chars:
+        if deep_bundle:
+            try:
+                result = run_deep_fallback_engine(
+                    bundle=bundle,
+                    instruction=instruction.text,
+                    out_path=out_path,
+                    model=args.model,
+                    cwd=args.cd,
+                    harness=harness,
+                    resume=args.resume,
+                    progress=progress,
+                )
+            except CliError:
+                if managed_run is not None:
+                    managed_run["status"] = "incomplete"
+                    update_run_record(managed_run)
+                raise
+        elif args.chunk_chars:
             chunks = split_transcript_chunks(transcript, args.chunk_chars, args.timestamps)
             result = run_chunked_agent_polish(
                 chunks=chunks,
@@ -3650,6 +3835,7 @@ def handle_args(args: argparse.Namespace) -> int:
             },
         }
         if bundle:
+            existing_bundle_metadata = read_json_file(bundle["metadata"]) if deep_bundle else {}
             records = {
                 "manifest": None,
                 "verification": None,
@@ -3680,7 +3866,10 @@ def handle_args(args: argparse.Namespace) -> int:
                     "instruction_sources": instruction.sources,
                     "timestamp_grounding": args.timestamps,
                     "agent_harness": result["harness"],
-                    "bundle_status": "planned" if deep_bundle else "completed",
+                    "bundle_status": result.get(
+                        "bundle_status",
+                        "planned" if deep_bundle else "completed",
+                    ),
                     "transcript_path": transcript_path,
                     "transcript_json_path": deep_bundle["transcript_json"] if deep_bundle else None,
                     "chunk_manifest_path": deep_bundle["chunk_manifest"] if deep_bundle else None,
@@ -3691,6 +3880,7 @@ def handle_args(args: argparse.Namespace) -> int:
                     "front_matter_enabled": args.front_matter,
                     "front_matter_data": front_matter_data,
                     "chunking": result["chunking"],
+                    "engine": existing_bundle_metadata.get("engine"),
                     "cache": cache,
                     "managed_run": managed_run,
                     "records": records,

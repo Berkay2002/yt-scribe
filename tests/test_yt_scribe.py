@@ -1611,7 +1611,7 @@ class YtScribeTests(unittest.TestCase):
         self.assertTrue(manifest["chunks"][0]["text_path"].endswith("chunk-001.txt"))
         self.assertTrue(manifest["chunks"][0]["note_path"].endswith("chunk-001-notes.md"))
         self.assertEqual(metadata["title"], "Chunk Planning Talk")
-        self.assertEqual(metadata["bundle_status"], "planned")
+        self.assertEqual(metadata["bundle_status"], "completed")
         self.assertTrue(verification["ok"])
         self.assertEqual(verification["missing"], [])
 
@@ -1655,6 +1655,200 @@ class YtScribeTests(unittest.TestCase):
 
         self.assertEqual(chunks[0]["source_segments"], {"start": 0, "end": 1})
         self.assertIn("x" * 100, chunks[0]["text"])
+
+    def deep_engine_transcript(self) -> dict[str, object]:
+        return {
+            **self.sample_transcript(),
+            "segments": [
+                {"start": 0.0, "duration": 600.0, "text": "first long chunk"},
+                {"start": 600.0, "duration": 600.0, "text": "second long chunk"},
+            ],
+            "text": "first long chunk\nsecond long chunk",
+        }
+
+    def test_deep_fallback_engine_runs_chunks_and_merge_for_harnesses(self):
+        for harness in ("codex", "opencode"):
+            with self.subTest(harness=harness), tempfile.TemporaryDirectory() as tmp_dir:
+                bundle_dir = Path(tmp_dir) / harness
+                transcript = self.deep_engine_transcript()
+                args = yt_scribe.build_parser().parse_args(
+                    [
+                        "--json",
+                        "run",
+                        "dQw4w9WgXcQ",
+                        "--workflow",
+                        "deep",
+                        "--agent-harness",
+                        harness,
+                        "--bundle-dir",
+                        str(bundle_dir),
+                    ],
+                )
+                stdout = io.StringIO()
+                calls = []
+
+                def fake_polish(_harness=harness, _calls=calls, **kwargs):
+                    _calls.append(kwargs)
+                    out_path = Path(kwargs["out_path"])
+                    if out_path.name == "polished.md":
+                        text = "merged final notes\n"
+                    else:
+                        text = f"notes for {out_path.stem}\n"
+                    return {
+                        "output_path": yt_scribe.write_text(kwargs["out_path"], text),
+                        "chars": len(text),
+                        "harness": _harness,
+                        "text": text,
+                    }
+
+                with (
+                    patch.object(yt_scribe, "fetch_video_title", return_value="Fallback Talk"),
+                    patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                    patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    self.assertEqual(yt_scribe.handle_args(args), 0)
+
+                payload = json.loads(stdout.getvalue())
+                metadata = json.loads((bundle_dir / "metadata.json").read_text())
+
+                self.assertEqual(len(calls), 3)
+                self.assertTrue((bundle_dir / "chunks" / "chunk-001-notes.md").is_file())
+                self.assertTrue((bundle_dir / "chunks" / "chunk-002-notes.md").is_file())
+                self.assertEqual((bundle_dir / "polished.md").read_text(), "merged final notes\n")
+                self.assertEqual(payload["run"]["chunking"]["engine"], "managed_fallback")
+                self.assertEqual(payload["run"]["chunking"]["merge_status"], "merged")
+                self.assertEqual(metadata["bundle_status"], "completed")
+                self.assertEqual(metadata["engine"]["status"], "completed")
+                self.assertEqual(metadata["engine"]["harness"], harness)
+
+    def test_deep_fallback_failure_records_incomplete_and_skips_merge(self):
+        transcript = self.deep_engine_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            args = [
+                "--json",
+                "run",
+                "dQw4w9WgXcQ",
+                "--workflow",
+                "deep",
+                "--bundle-dir",
+                str(bundle_dir),
+            ]
+            stdout = io.StringIO()
+            calls = []
+
+            def fake_polish(**kwargs):
+                calls.append(kwargs)
+                out_path = Path(kwargs["out_path"])
+                if out_path.name == "chunk-002-notes.md":
+                    raise yt_scribe.CliError("chunk failed", "agent_failed")
+                text = "chunk one notes\n"
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], text),
+                    "chars": len(text),
+                    "harness": "codex",
+                    "text": text,
+                }
+
+            with (
+                patch.object(yt_scribe, "fetch_video_title", return_value="Failure Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = yt_scribe.main(args)
+
+            payload = json.loads(stdout.getvalue())
+            metadata = json.loads((bundle_dir / "metadata.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["error"]["code"], "deep_run_incomplete")
+        self.assertEqual(metadata["bundle_status"], "incomplete")
+        self.assertEqual(metadata["engine"]["status"], "incomplete")
+        self.assertEqual(metadata["engine"]["failures"][0]["chunk_id"], "chunk-002")
+        self.assertFalse((bundle_dir / "polished.md").exists())
+        self.assertEqual(
+            [Path(call["out_path"]).name for call in calls],
+            ["chunk-001-notes.md", "chunk-002-notes.md"],
+        )
+
+    def test_deep_fallback_resume_retries_missing_chunks_and_merges(self):
+        transcript = self.deep_engine_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            first_args = [
+                "--json",
+                "run",
+                "dQw4w9WgXcQ",
+                "--workflow",
+                "deep",
+                "--bundle-dir",
+                str(bundle_dir),
+            ]
+
+            def failing_polish(**kwargs):
+                out_path = Path(kwargs["out_path"])
+                if out_path.name == "chunk-002-notes.md":
+                    raise yt_scribe.CliError("chunk failed", "agent_failed")
+                text = "chunk one notes\n"
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], text),
+                    "chars": len(text),
+                    "harness": "codex",
+                    "text": text,
+                }
+
+            with (
+                patch.object(yt_scribe, "fetch_video_title", return_value="Resume Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(yt_scribe, "run_agent_polish", side_effect=failing_polish),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(yt_scribe.main(first_args), 1)
+
+            second_args = [
+                "--json",
+                "run",
+                "dQw4w9WgXcQ",
+                "--workflow",
+                "deep",
+                "--bundle-dir",
+                str(bundle_dir),
+                "--resume",
+            ]
+            second_stdout = io.StringIO()
+            second_calls = []
+
+            def completing_polish(**kwargs):
+                second_calls.append(Path(kwargs["out_path"]).name)
+                out_path = Path(kwargs["out_path"])
+                text = "merged notes\n" if out_path.name == "polished.md" else "chunk two notes\n"
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], text),
+                    "chars": len(text),
+                    "harness": "codex",
+                    "text": text,
+                }
+
+            with (
+                patch.object(yt_scribe, "fetch_video_title", return_value="Resume Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(yt_scribe, "run_agent_polish", side_effect=completing_polish),
+                contextlib.redirect_stdout(second_stdout),
+            ):
+                parsed_args = yt_scribe.build_parser().parse_args(second_args)
+                self.assertEqual(yt_scribe.handle_args(parsed_args), 0)
+
+            payload = json.loads(second_stdout.getvalue())
+            metadata = json.loads((bundle_dir / "metadata.json").read_text())
+
+        self.assertEqual(second_calls, ["chunk-002-notes.md", "polished.md"])
+        self.assertEqual(payload["run"]["chunking"]["resumed_chunks"], 1)
+        self.assertEqual(metadata["bundle_status"], "completed")
+        self.assertEqual(metadata["engine"]["status"], "completed")
 
     def test_rename_custom_bundle_does_not_move_user_bundle_directory(self):
         transcript = self.sample_transcript()
