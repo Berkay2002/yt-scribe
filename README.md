@@ -164,7 +164,6 @@ yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID" --focus "Keep only deci
 ```sh
 yt-scribe doctor
 yt-scribe inspect "<youtube-url>"
-yt-scribe inspect "https://www.youtube.com/playlist?list=PLAYLIST_ID" --brief
 yt-scribe fetch "<youtube-url>" --out transcript.txt
 yt-scribe polish transcript.txt --style notes --out notes.md
 yt-scribe run "<youtube-url>"
@@ -193,15 +192,13 @@ yt-scribe --json setup
 
 `inspect <url>`
 
-Resolves the YouTube video and lists caption tracks. Playlist URLs preflight
-each playlist video, so you can see caption availability before batch polishing.
+Resolves the YouTube video and lists caption tracks.
 
 Use `--brief` when an agent or script only needs caption availability and
 language codes:
 
 ```sh
 yt-scribe inspect "<url>" --brief
-yt-scribe inspect "https://www.youtube.com/playlist?list=PLAYLIST_ID" --brief
 ```
 
 `fetch <url>`
@@ -338,6 +335,9 @@ Use ordered language fallback when caption languages vary across videos:
 yt-scribe fetch "<youtube-url>" --langs en,en-US,en-GB,sv --out transcript.txt
 yt-scribe run "<youtube-url>" --langs en,en-US,en-GB,sv
 ```
+
+When no requested language matches, the error includes available language codes
+and a concrete `--langs ...` retry suggestion.
 
 Add factual front matter to polished markdown when the output will be indexed,
 cited, or processed by another tool:
@@ -478,7 +478,10 @@ All MCP tools return structured payloads with `ok: true` on success. Errors use
 the same code vocabulary as the CLI where practical, such as
 `invalid_youtube_url` and `no_captions`.
 
-Example STDIO MCP client config:
+<details>
+<summary>Generic STDIO MCP client config</summary>
+
+Example config:
 
 ```json
 {
@@ -490,6 +493,11 @@ Example STDIO MCP client config:
   }
 }
 ```
+
+</details>
+
+<details>
+<summary>Codex MCP config</summary>
 
 Codex CLI and the Codex IDE extension share MCP config through
 `~/.codex/config.toml`, or a trusted project-local `.codex/config.toml`.
@@ -527,6 +535,11 @@ tool_timeout_sec = 300
 ```
 
 In the Codex TUI, use `/mcp` to inspect active MCP servers.
+
+</details>
+
+<details>
+<summary>OpenCode MCP config</summary>
 
 OpenCode config uses the `mcp` object in `opencode.jsonc`. Local STDIO:
 
@@ -576,6 +589,11 @@ OpenCode HTTP mode:
 }
 ```
 
+</details>
+
+<details>
+<summary>FastMCP config generator</summary>
+
 The FastMCP installer can generate or install local MCP configs for clients it
 supports, including Claude Desktop, Claude Code, Cursor, Gemini CLI, Goose,
 `mcp-json`, and `stdio`. MCP clients run servers in isolated environments, so
@@ -590,6 +608,8 @@ fastmcp install mcp-json yt_scribe_mcp.py:create_mcp_server -e . --server-name y
 For hosts not listed by `fastmcp install`, including clients that use a generic
 MCP JSON file, use the standard STDIO config above or the generated `mcp-json`
 output.
+
+</details>
 
 Debug with MCP Inspector:
 

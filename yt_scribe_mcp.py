@@ -462,7 +462,7 @@ def validate_transport_args(
     parser: argparse.ArgumentParser,
     args: argparse.Namespace,
 ) -> None:
-    if not args.http and (args.host or args.port):
+    if not args.http and (args.host is not None or args.port is not None):
         parser.error("Host and port arguments are only valid with --http.")
 
 

@@ -274,6 +274,11 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "language_not_available")
         self.assertEqual(error.exception.details["requested_languages"], ["de", "fr"])
         self.assertEqual(error.exception.details["available_languages"], ["sv", "en-GB"])
+        self.assertEqual(
+            error.exception.details["suggested_fallback"],
+            "--langs de,fr,sv,en-GB",
+        )
+        self.assertIn("--langs de,fr,sv,en-GB", str(error.exception))
 
     def test_fetch_transcript_falls_back_to_raw_timedtext_when_api_list_is_blocked(self):
         def fake_http_get(url, proxy_config=None):
@@ -1149,48 +1154,6 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(payload["video"]["languages"], ["en", "sv"])
         self.assertEqual(payload["video"]["manual_languages"], ["en"])
         self.assertEqual(payload["video"]["auto_generated_languages"], ["sv"])
-
-    def test_inspect_playlist_preflights_caption_availability(self):
-        args = yt_scribe.build_parser().parse_args(
-            [
-                "--json",
-                "inspect",
-                "https://www.youtube.com/playlist?list=PLabc123",
-                "--brief",
-            ]
-        )
-        stdout = io.StringIO()
-
-        def fake_inspect(url_or_id, proxy_config=None):
-            video_id = yt_scribe.extract_video_id(url_or_id)
-            return {
-                "id": video_id,
-                "url": yt_scribe.canonical_watch_url(video_id),
-                "has_captions": video_id == "dQw4w9WgXcQ",
-                "caption_tracks": 1 if video_id == "dQw4w9WgXcQ" else 0,
-                "languages": ["en"] if video_id == "dQw4w9WgXcQ" else [],
-                "manual_languages": ["en"] if video_id == "dQw4w9WgXcQ" else [],
-                "auto_generated_languages": [],
-                "tracks": [],
-            }
-
-        with (
-            patch.object(
-                yt_scribe,
-                "fetch_playlist_video_ids",
-                return_value=["dQw4w9WgXcQ", "aaaaaaaaaaa"],
-            ),
-            patch.object(yt_scribe, "inspect_video_payload", side_effect=fake_inspect),
-            contextlib.redirect_stdout(stdout),
-        ):
-            exit_code = yt_scribe.handle_args(args)
-
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(payload["playlist"]["id"], "PLabc123")
-        self.assertEqual(payload["playlist"]["total"], 2)
-        self.assertEqual(payload["playlist"]["with_captions"], 1)
-        self.assertEqual(payload["playlist"]["videos"][0]["languages"], ["en"])
 
     def test_verify_polished_output_classifies_findings_conservatively(self):
         transcript = (

@@ -359,6 +359,21 @@ class PolishInstruction:
     sources: list[str]
 
 
+@dataclass
+class PolishOptions:
+    style: str = "notes"
+    template: str | None = None
+    focus: list[str] | None = None
+    focus_file: list[str] | None = None
+    instruction: str | None = None
+    prompt_file: str | None = None
+    timestamps: bool = False
+    agent_harness: str | None = None
+    model: str | None = None
+    cd: str | None = None
+    max_chars: int = 0
+
+
 class ProgressWait:
     def __init__(self, reporter: ProgressReporter, message: str, interval_seconds: int = 15):
         self.reporter = reporter
@@ -646,16 +661,21 @@ def choose_track_from_languages(
             last_error = exc
 
     available = [track.language_code for track in tracks]
+    suggested_languages = ",".join([*requested, *available])
+    suggested_fallback = f"--langs {suggested_languages}" if suggested_languages else None
     message = (
         "No caption track matched requested languages "
         f"{', '.join(requested)}. Available: {', '.join(available)}"
     )
+    if suggested_fallback:
+        message += f". Try: {suggested_fallback}"
     raise CliError(
         message,
         "language_not_available",
         {
             "requested_languages": requested,
             "available_languages": available,
+            "suggested_fallback": suggested_fallback,
             **(last_error.details if last_error else {}),
         },
     )
@@ -1633,84 +1653,6 @@ def fetch_playlist_video_ids(
     return video_ids
 
 
-def has_video_id(value: str) -> bool:
-    try:
-        extract_video_id(value)
-    except CliError:
-        return False
-    return True
-
-
-def inspect_playlist_payload(
-    playlist_url: str,
-    proxy_config: GenericProxyConfig | None = None,
-    brief: bool = False,
-) -> dict[str, Any]:
-    playlist_id = playlist_id_from_url(playlist_url)
-    if not playlist_id:
-        raise CliError("No playlist id found in URL", "invalid_playlist_url")
-
-    videos: list[dict[str, Any]] = []
-    for video_id in fetch_playlist_video_ids(playlist_url, proxy_config):
-        try:
-            video = inspect_video_payload(video_id, proxy_config)
-            if brief:
-                video = {
-                    "id": video["id"],
-                    "url": video["url"],
-                    "has_captions": video["has_captions"],
-                    "caption_tracks": video["caption_tracks"],
-                    "languages": video["languages"],
-                    "manual_languages": video["manual_languages"],
-                    "auto_generated_languages": video["auto_generated_languages"],
-                }
-            video["ok"] = True
-        except CliError as exc:
-            video = {
-                "id": video_id,
-                "url": canonical_watch_url(video_id),
-                "ok": False,
-                "error": {
-                    "code": exc.code,
-                    "message": str(exc),
-                    **exc.details,
-                },
-            }
-        videos.append(video)
-
-    return {
-        "id": playlist_id,
-        "url": playlist_url,
-        "videos": videos,
-        "total": len(videos),
-        "with_captions": sum(1 for video in videos if video.get("has_captions")),
-        "inspect_failed": sum(1 for video in videos if not video.get("ok", True)),
-    }
-
-
-def render_playlist_inspection(playlist: dict[str, Any]) -> str:
-    lines = [
-        f"playlist: {playlist['id']}",
-        (
-            f"videos: {playlist['total']}, with captions: {playlist['with_captions']}, "
-            f"inspect failed: {playlist['inspect_failed']}"
-        ),
-    ]
-    for video in playlist["videos"]:
-        if video.get("ok", True):
-            languages = ", ".join(video.get("languages") or []) or "none"
-            lines.append(
-                f"- {video['id']}: captions "
-                f"{'yes' if video.get('has_captions') else 'no'} ({languages})"
-            )
-        else:
-            lines.append(
-                f"- {video['id']}: failed "
-                f"{video['error']['code']}: {video['error']['message']}"
-            )
-    return "\n".join(lines) + "\n"
-
-
 def expand_batch_items(
     urls: list[str],
     proxy_config: GenericProxyConfig | None,
@@ -2367,7 +2309,9 @@ def style_instruction(style: str, harness: str) -> str:
     )
 
 
-def custom_instruction_parts(args: argparse.Namespace) -> tuple[list[str], list[str]]:
+def custom_instruction_parts(
+    args: argparse.Namespace | PolishOptions,
+) -> tuple[list[str], list[str]]:
     parts: list[str] = []
     sources: list[str] = []
 
@@ -2391,7 +2335,10 @@ def custom_instruction_parts(args: argparse.Namespace) -> tuple[list[str], list[
     return parts, sources
 
 
-def resolve_instruction(args: argparse.Namespace, harness: str) -> PolishInstruction:
+def resolve_instruction(
+    args: argparse.Namespace | PolishOptions,
+    harness: str,
+) -> PolishInstruction:
     timestamp_sources = ["--timestamps"] if getattr(args, "timestamps", False) else []
     replacement_sources = [
         source
@@ -2464,7 +2411,7 @@ def limit_text(text: str, max_chars: int) -> str:
     return text
 
 
-def selected_agent_harness(args: argparse.Namespace) -> str:
+def selected_agent_harness(args: argparse.Namespace | PolishOptions) -> str:
     return args.agent_harness or effective_agent_harness()
 
 
@@ -2472,7 +2419,7 @@ def harness_label(harness: str) -> str:
     return {"codex": "Codex", "opencode": "OpenCode"}.get(harness, harness)
 
 
-def polish_args_namespace(
+def polish_options(
     *,
     style: str | None = None,
     template: str | None = None,
@@ -2485,8 +2432,8 @@ def polish_args_namespace(
     model: str | None = None,
     cd: str | None = None,
     max_chars: int = 0,
-) -> argparse.Namespace:
-    return argparse.Namespace(
+) -> PolishOptions:
+    return PolishOptions(
         style=style or "notes",
         template=template,
         focus=focus,
@@ -2519,7 +2466,7 @@ def polish_transcript_text_payload(
     input_path: str | None = None,
     progress: ProgressReporter | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    args = polish_args_namespace(
+    options = polish_options(
         style=style,
         template=template,
         focus=focus,
@@ -2533,8 +2480,8 @@ def polish_transcript_text_payload(
         max_chars=max_chars,
     )
     transcript_text = limit_text(transcript_text, max_chars)
-    harness = selected_agent_harness(args)
-    resolved_instruction = resolve_instruction(args, harness)
+    harness = selected_agent_harness(options)
+    resolved_instruction = resolve_instruction(options, harness)
     if progress:
         progress.message(f"Using {harness_label(harness)}")
     result = run_agent_polish(
@@ -2548,7 +2495,7 @@ def polish_transcript_text_payload(
     )
     payload = {
         "input_path": input_path,
-        "style": args.style,
+        "style": options.style,
         "instruction_mode": resolved_instruction.mode,
         "instruction_sources": resolved_instruction.sources,
         "timestamp_grounding": timestamps,
@@ -2731,12 +2678,6 @@ def handle_args(args: argparse.Namespace) -> int:
 
     if args.command == "inspect":
         proxy_config = proxy_config_from_args(args)
-        if args.playlist or (playlist_id_from_url(args.url) and not has_video_id(args.url)):
-            playlist = inspect_playlist_payload(args.url, proxy_config, args.brief)
-            payload = {"ok": playlist["inspect_failed"] == 0, "playlist": playlist}
-            emit(payload, args.json, render_playlist_inspection(playlist))
-            return 0 if playlist["inspect_failed"] == 0 else 1
-
         video = inspect_video_payload(args.url, proxy_config)
         tracks = video["tracks"]
         payload = {
@@ -3382,11 +3323,6 @@ ai contract:
         "--brief",
         action="store_true",
         help="print the smallest useful caption availability summary",
-    )
-    inspect_parser.add_argument(
-        "--playlist",
-        action="store_true",
-        help="inspect playlist videos and caption availability before polishing",
     )
     add_proxy_flags(inspect_parser)
 

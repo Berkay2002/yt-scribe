@@ -1,9 +1,11 @@
 import asyncio
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import tomllib
 
 import yt_scribe
@@ -257,8 +259,36 @@ def test_mcp_agent_run_fetches_and_polishes_without_live_harness():
     assert polish.call_args.kwargs["transcript_text"] == "[00:01] hello"
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("fastmcp") is None,
+    reason="requires the optional mcp extra",
+)
+def test_mcp_server_exposes_expected_tools_through_fastmcp_client():
+    from fastmcp import Client
+
+    async def list_tool_names():
+        async with Client(yt_scribe_mcp.create_mcp_server()) as client:
+            tools = await client.list_tools()
+            return {tool.name for tool in tools}
+
+    assert asyncio.run(list_tool_names()) == {
+        "yt_scribe_info",
+        "inspect_youtube_captions",
+        "fetch_youtube_transcript",
+        "agent_polish_transcript",
+        "agent_fetch_and_polish_youtube",
+    }
+
+
 def test_mcp_rejects_http_host_without_http_mode():
     result = run_mcp_cli("--host", "127.0.0.1")
+
+    assert result.returncode == 2
+    assert "Host and port arguments are only valid with --http." in result.stderr
+
+
+def test_mcp_rejects_http_port_without_http_mode_even_when_zero():
+    result = run_mcp_cli("--port", "0")
 
     assert result.returncode == 2
     assert "Host and port arguments are only valid with --http." in result.stderr
