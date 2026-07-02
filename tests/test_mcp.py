@@ -8,8 +8,9 @@ from unittest.mock import patch
 import pytest
 import tomllib
 
-import yt_scribe
+import yt_scribe as package
 import yt_scribe_mcp
+from yt_scribe import youtube
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "yt_scribe_mcp.py"
@@ -73,7 +74,7 @@ def test_readme_documents_mcp_client_configuration():
 def test_mcp_info_payload_is_stable_without_optional_dependencies():
     assert yt_scribe_mcp.server_info() == {
         "package": "yt-scribe",
-        "version": yt_scribe.VERSION,
+        "version": package.VERSION,
         "default_transport": "stdio",
         "supported_tool_groups": ["info", "inspect", "fetch", "polish", "run"],
         "agent_tools_enabled": True,
@@ -89,11 +90,11 @@ def test_mcp_info_payload_can_hide_agent_tool_groups():
 
 def test_mcp_inspect_returns_caption_metadata_without_network():
     tracks = [
-        yt_scribe.CaptionTrack("English", "en", "https://example.test/en"),
-        yt_scribe.CaptionTrack("Swedish", "sv", "https://example.test/sv", kind="asr"),
+        youtube.CaptionTrack("English", "en", "https://example.test/en"),
+        youtube.CaptionTrack("Swedish", "sv", "https://example.test/sv", kind="asr"),
     ]
 
-    with patch.object(yt_scribe, "list_transcript_tracks", return_value=tracks):
+    with patch.object(package, "list_transcript_tracks", return_value=tracks):
         payload = yt_scribe_mcp.inspect_youtube_captions("dQw4w9WgXcQ")
 
     assert payload["ok"] is True
@@ -124,7 +125,7 @@ def test_mcp_fetch_returns_rendered_transcript_and_metadata_without_network():
     }
 
     with patch.object(
-        yt_scribe,
+        package,
         "load_or_fetch_transcript",
         return_value=(transcript, {"status": "disabled", "path": None}),
     ) as load:
@@ -147,9 +148,9 @@ def test_mcp_fetch_returns_rendered_transcript_and_metadata_without_network():
 
 def test_mcp_fetch_preserves_transcript_error_code():
     with patch.object(
-        yt_scribe,
+        package,
         "load_or_fetch_transcript",
-        side_effect=yt_scribe.CliError("No caption tracks were found", "no_captions"),
+        side_effect=package.CliError("No caption tracks were found", "no_captions"),
     ):
         payload = yt_scribe_mcp.fetch_youtube_transcript("dQw4w9WgXcQ")
 
@@ -175,7 +176,7 @@ def test_mcp_fetch_reports_progress_when_context_is_available():
             progress_events.append((progress, total, message))
 
     with patch.object(
-        yt_scribe,
+        package,
         "load_or_fetch_transcript",
         return_value=(transcript, {"status": "disabled", "path": None}),
     ):
@@ -206,7 +207,7 @@ def test_mcp_agent_tools_can_be_disabled_by_environment(monkeypatch):
 
 def test_mcp_agent_polish_uses_existing_harness_boundary():
     with patch.object(
-        yt_scribe,
+        package,
         "run_agent_polish",
         return_value={
             "output_path": None,
@@ -246,12 +247,12 @@ def test_mcp_agent_run_fetches_and_polishes_without_live_harness():
 
     with (
         patch.object(
-            yt_scribe,
+            package,
             "load_or_fetch_transcript",
             return_value=(transcript, {"status": "disabled", "path": None}),
         ) as load,
         patch.object(
-            yt_scribe,
+            package,
             "run_agent_polish",
             return_value={
                 "output_path": None,
