@@ -1459,7 +1459,7 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
         "--style",
         choices=sorted(STYLE_INSTRUCTIONS),
         default="notes",
-        help="Codex output style, default: notes",
+        help="polished output style, default: notes",
     )
     parser.add_argument("--out", help="write polished output to this file")
     parser.add_argument(

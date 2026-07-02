@@ -35,6 +35,12 @@ Then use it:
 yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
+Or let an agent install it for you. Open Codex or OpenCode and paste this:
+
+```text
+Install yt-scribe on this machine: run python -m pip install --upgrade git+https://github.com/Berkay2002/yt-scribe.git && python -m yt_scribe setup, then run python -m yt_scribe --json doctor and tell me whether the yt-scribe command is on PATH and which agent harnesses are available. If yt-scribe is not on PATH, tell me the python -m yt_scribe fallback command to use. Then ask whether I want to add yt-scribe guidance to the current project's AGENTS.md so teammates and future agents use it consistently. If I say yes, add a yt-scribe section that says to use yt-scribe for YouTube transcript workflows, prefer yt-scribe run "<youtube-url>" for one-command transcript-to-notes work, use yt-scribe --json inspect "<youtube-url>" before assuming captions exist, do not bypass private or disabled captions, and do not add facts that are not in the transcript.
+```
+
 For local development or immediate use from a checkout, run the local installer. It installs the package in editable mode, creates the wrapper, and runs `yt-scribe setup` for you.
 
 ```sh
