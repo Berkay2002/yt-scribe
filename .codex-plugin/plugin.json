@@ -1,7 +1,7 @@
 {
   "name": "yt-scribe",
   "version": "0.1.0",
-  "description": "Use yt-scribe to fetch YouTube transcripts and polish them with Codex.",
+  "description": "Use yt-scribe to fetch YouTube transcripts and polish them with Codex or OpenCode.",
   "author": {
     "name": "Berkay"
   },
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "YT Scribe",
     "shortDescription": "Fetch and polish YouTube transcripts.",
-    "longDescription": "YT Scribe adds a companion skill for the yt-scribe CLI, which fetches YouTube captions and uses codex exec to polish transcripts into notes, summaries, cleaned text, or article-style prose.",
+    "longDescription": "YT Scribe adds a companion skill for the yt-scribe CLI, which fetches YouTube captions and uses Codex or OpenCode to polish transcripts into notes, summaries, cleaned text, or article-style prose.",
     "developerName": "Berkay",
     "category": "Productivity",
     "capabilities": ["Read", "Interactive"],

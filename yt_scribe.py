@@ -28,6 +28,8 @@ DEFAULT_AGENT_HARNESS = "codex"
 AGENT_HARNESSES = ("codex", "opencode")
 CONFIG_ENV_VAR = "YT_SCRIBE_CONFIG"
 CONFIG_FILENAME = "config.json"
+AGENTS_SKILLS_DIR_ENV_VAR = "YT_SCRIBE_AGENTS_SKILLS_DIR"
+OPENCODE_AGENTS_DIR_ENV_VAR = "YT_SCRIBE_OPENCODE_AGENTS_DIR"
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -67,6 +69,146 @@ HARNESS_INSTRUCTIONS = {
 TRANSCRIPT_DELIVERY = {
     "codex": "stdin",
     "opencode": "an attached transcript file",
+}
+OPENCODE_POLISHER_AGENT = "yt-scribe-transcript-polisher"
+
+EMBEDDED_HARNESS_ASSETS = {
+    ".agents/skills/yt-scribe-transcript-polisher/SKILL.md": """---
+name: yt-scribe-transcript-polisher
+description: Polish transcript text passed by yt-scribe. Do not fetch captions.
+---
+
+# yt-scribe Transcript Polisher
+
+Transform the transcript text already provided by `yt-scribe`. Do not fetch the video,
+inspect unrelated files, run shell commands, or call `yt-scribe`; that work belongs
+to the outer CLI workflow.
+
+Read exactly one harness file based on how the transcript was provided:
+
+- Codex stdin: `harness/codex.md`
+- OpenCode attached transcript file: `harness/opencode.md`
+
+## Rules
+
+- Return only the requested polished transcript output.
+- Preserve the speaker's meaning, sequence, and concrete claims.
+- Remove caption artifacts, repeated fragments, filler, obvious false starts, and timestamp residue.
+- Do not add facts, examples, citations, links, or claims that are not in the transcript.
+- Do not mention that you used a skill, a harness, stdin, an attached file, or a cleaning process.
+- If the transcript is empty or unusable, say that the transcript content is missing or unusable.
+
+## Output Modes
+
+For `clean`, produce lightly edited prose close to the original transcript.
+
+For `notes`, produce markdown notes with short headings and bullets. Keep the
+structure useful for review, not overly nested.
+
+For `summary`, produce a concise markdown summary with the main ideas, key details,
+and action items when present.
+
+For `article`, produce readable article-style markdown while preserving the original
+argument and order.
+
+## Quality Bar
+
+Prefer boring accuracy over elegant rewriting. When a phrase is ambiguous, keep it
+closer to the original instead of guessing. Preserve names, commands, numbers,
+dates, and technical terms exactly unless the transcript clearly contains a
+captioning artifact.
+""",
+    ".agents/skills/yt-scribe-transcript-polisher/harness/codex.md": """# Codex Harness
+
+Use this file when `yt-scribe` invokes Codex through `codex exec`.
+
+The transcript is provided through stdin, appended to the prompt as the content to
+transform. Return only the polished transcript output.
+
+Do not mention Codex, stdin, or the polishing process in the final answer.
+""",
+    ".agents/skills/yt-scribe-transcript-polisher/harness/opencode.md": """# OpenCode Harness
+
+Use this file when `yt-scribe` invokes OpenCode through `opencode run`, usually
+with `--agent yt-scribe-transcript-polisher`.
+
+The transcript is attached as a temp transcript file. Read that attached transcript
+as the content to transform. Return only the polished transcript output.
+
+Do not mention OpenCode, the attached file, or the polishing process in the final answer.
+""",
+    ".agents/skills/yt-scribe-transcript-polisher/agents/openai.yaml": """interface:
+  display_name: "YT Scribe Transcript Polisher"
+  short_description: "Polish transcript text passed through yt-scribe."
+  default_prompt: "Polish this transcript into clean notes."
+""",
+    ".opencode/agents/yt-scribe.md": """---
+description: Fetch and polish YouTube transcripts through the yt-scribe CLI.
+mode: all
+permission:
+  edit: deny
+  bash:
+    "*": ask
+    "yt-scribe *": allow
+    "python yt_scribe.py *": allow
+    "python -m pytest *": allow
+    "python -m ruff *": allow
+---
+
+You are the OpenCode-facing yt-scribe agent.
+
+Use the installed `yt-scribe` CLI for YouTube transcript workflows. Prefer `--json`
+when reading command output for analysis or chaining.
+
+For OpenCode-specific command details, follow `skills/yt-scribe/harness/opencode.md`
+in this repository when it is available. The inner polishing skill lives at
+`.agents/skills/yt-scribe-transcript-polisher`.
+
+Default workflow:
+
+```powershell
+yt-scribe --json inspect "<youtube-url>"
+yt-scribe --json fetch "<youtube-url>" --lang en --out transcript.txt
+yt-scribe --json polish transcript.txt --agent-harness opencode --style notes --out notes.md
+```
+
+One-command workflow:
+
+```powershell
+yt-scribe --json run "<youtube-url>" --agent-harness opencode
+```
+
+Do not bypass private, disabled, or unavailable captions. Do not pass secrets in
+`--instruction` or prompt files.
+""",
+    ".opencode/agents/yt-scribe-transcript-polisher.md": """---
+description: Polish transcript text attached by yt-scribe.
+mode: all
+temperature: 0.1
+permission:
+  edit: deny
+  bash: deny
+---
+
+You are the OpenCode transcript polisher for yt-scribe.
+
+Transform the transcript attached by `yt-scribe`. Read the attached transcript file
+as the source content. Do not fetch the video, inspect unrelated files, run shell
+commands, or call `yt-scribe`; that work belongs to the outer CLI workflow.
+
+For OpenCode-specific polish behavior, follow
+`.agents/skills/yt-scribe-transcript-polisher/harness/opencode.md` in this
+repository when it is available.
+
+Rules:
+
+- Return only the requested polished transcript output.
+- Preserve the speaker's meaning, sequence, and concrete claims.
+- Remove caption artifacts, repeated fragments, filler, obvious false starts, and timestamp residue.
+- Do not add facts, examples, citations, links, or claims that are not in the transcript.
+- Do not mention that you used an agent, a skill, OpenCode, an attached file, or a cleaning process.
+- If the transcript is empty or unusable, say that the transcript content is missing or unusable.
+""",
 }
 
 
@@ -449,6 +591,110 @@ def command_output(command: list[str]) -> str | None:
     return output or None
 
 
+def opencode_agent_available(agent_name: str, cwd: str | None = None) -> bool:
+    start = Path(cwd).expanduser().resolve() if cwd else Path.cwd().resolve()
+    for path in [start, *start.parents]:
+        if (path / ".opencode" / "agents" / f"{agent_name}.md").is_file():
+            return True
+    if (opencode_agents_dir() / f"{agent_name}.md").is_file():
+        return True
+    return False
+
+
+def agents_skills_dir() -> Path:
+    override = os.environ.get(AGENTS_SKILLS_DIR_ENV_VAR)
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path.home() / ".agents" / "skills"
+
+
+def opencode_config_dir() -> Path:
+    output = command_output(["opencode", "debug", "paths"]) if command_path("opencode") else None
+    if output:
+        for line in output.splitlines():
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2 and parts[0] == "config":
+                return Path(parts[1]).expanduser().resolve()
+    return Path.home() / ".config" / "opencode"
+
+
+def opencode_agents_dir() -> Path:
+    override = os.environ.get(OPENCODE_AGENTS_DIR_ENV_VAR)
+    if override:
+        return Path(override).expanduser().resolve()
+    return opencode_config_dir() / "agents"
+
+
+def source_asset_path(relative_path: str) -> Path | None:
+    candidate = Path(__file__).resolve().parent / Path(relative_path)
+    return candidate if candidate.is_file() else None
+
+
+def asset_content(relative_path: str) -> str:
+    source = source_asset_path(relative_path)
+    if source:
+        return source.read_text(encoding="utf-8")
+    return EMBEDDED_HARNESS_ASSETS[relative_path]
+
+
+def harness_asset_targets() -> dict[str, Path]:
+    skills_dir = agents_skills_dir()
+    opencode_dir = opencode_agents_dir()
+    return {
+        ".agents/skills/yt-scribe-transcript-polisher/SKILL.md": (
+            skills_dir / "yt-scribe-transcript-polisher" / "SKILL.md"
+        ),
+        ".agents/skills/yt-scribe-transcript-polisher/harness/codex.md": (
+            skills_dir / "yt-scribe-transcript-polisher" / "harness" / "codex.md"
+        ),
+        ".agents/skills/yt-scribe-transcript-polisher/harness/opencode.md": (
+            skills_dir / "yt-scribe-transcript-polisher" / "harness" / "opencode.md"
+        ),
+        ".agents/skills/yt-scribe-transcript-polisher/agents/openai.yaml": (
+            skills_dir / "yt-scribe-transcript-polisher" / "agents" / "openai.yaml"
+        ),
+        ".opencode/agents/yt-scribe.md": opencode_dir / "yt-scribe.md",
+        ".opencode/agents/yt-scribe-transcript-polisher.md": (
+            opencode_dir / "yt-scribe-transcript-polisher.md"
+        ),
+    }
+
+
+def install_harness_assets() -> dict[str, Any]:
+    installed = []
+    for relative_path, target in harness_asset_targets().items():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        content = asset_content(relative_path)
+        target.write_text(content, encoding="utf-8")
+        installed.append(
+            {
+                "source": relative_path,
+                "path": str(target),
+                "bytes": len(content.encode("utf-8")),
+            }
+        )
+    return {
+        "agents_skills_dir": str(agents_skills_dir()),
+        "opencode_agents_dir": str(opencode_agents_dir()),
+        "installed": installed,
+    }
+
+
+def harness_assets_payload() -> dict[str, Any]:
+    targets = harness_asset_targets()
+    return {
+        "agents_skills_dir": str(agents_skills_dir()),
+        "opencode_agents_dir": str(opencode_agents_dir()),
+        "targets": {
+            relative_path: {
+                "path": str(target),
+                "installed": target.exists(),
+            }
+            for relative_path, target in targets.items()
+        },
+    }
+
+
 def config_path() -> Path:
     override = os.environ.get(CONFIG_ENV_VAR)
     if override:
@@ -567,6 +813,7 @@ def doctor_payload() -> dict[str, Any]:
             "resolved_command": command_path(COMMAND_NAME),
         },
         "config": config_payload(),
+        "harness_assets": harness_assets_payload(),
         "lifecycle": lifecycle_steps(),
     }
 
@@ -683,6 +930,8 @@ def run_opencode_polish(
             "--format",
             "json",
         )
+        if opencode_agent_available(OPENCODE_POLISHER_AGENT, cwd):
+            command.extend(["--agent", OPENCODE_POLISHER_AGENT])
         if cwd:
             command.extend(["--dir", str(Path(cwd).expanduser().resolve())])
         if model:
@@ -800,6 +1049,16 @@ def selected_agent_harness(args: argparse.Namespace) -> str:
 
 
 def handle_args(args: argparse.Namespace) -> int:
+    if args.command == "install-harness-assets":
+        payload = {"ok": True, "harness_assets": install_harness_assets()}
+        text = (
+            f"Installed harness assets:\n"
+            f"  agents skills: {payload['harness_assets']['agents_skills_dir']}\n"
+            f"  OpenCode agents: {payload['harness_assets']['opencode_agents_dir']}\n"
+        )
+        emit(payload, args.json, text)
+        return 0
+
     if args.command == "config":
         config = read_config()
         if args.config_command == "set":
@@ -1052,6 +1311,10 @@ ai contract:
     )
 
     subparsers.add_parser("doctor", help="check Codex, Python, and PATH setup")
+    subparsers.add_parser(
+        "install-harness-assets",
+        help="install global inner-agent skills and OpenCode agents",
+    )
     subparsers.add_parser("lifecycle", help="print the recommended workflow")
 
     inspect_parser = subparsers.add_parser(

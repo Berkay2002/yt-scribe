@@ -35,6 +35,14 @@ Check your setup:
 yt-scribe doctor
 ```
 
+Install global harness assets for inner agent runs:
+
+```powershell
+yt-scribe install-harness-assets
+```
+
+This copies the transcript-polisher skill to `~/.agents/skills/yt-scribe-transcript-polisher` and the OpenCode agents to OpenCode's global agents directory. This is needed when the globally installed CLI is used from projects that do not contain this repository's `.agents` or `.opencode` folders.
+
 `yt-scribe` uses `youtube-transcript-api` for caption access. Maintainers can install test and lint tools with:
 
 ```powershell
@@ -161,6 +169,15 @@ yt-scribe config unset default-agent-harness
 
 Without config, `yt-scribe` uses Codex. A config default changes future `polish` and `run` commands unless a command passes `--agent-harness` explicitly.
 
+`install-harness-assets`
+
+Installs the inner transcript-polisher skill and OpenCode agents into global user-level locations.
+
+```powershell
+yt-scribe install-harness-assets
+yt-scribe --json install-harness-assets
+```
+
 `raw <url>`
 
 Read-only diagnostic escape hatch for inspecting the selected YouTube timedtext caption URL. Most users do not need this because normal transcript fetching uses `youtube-transcript-api`.
@@ -220,6 +237,12 @@ OpenCode is available when `opencode` is on PATH and selected with `--agent-harn
 opencode run "<instruction>" --file <temp-transcript-file> --format json
 ```
 
+When the project-local OpenCode agent is available, `yt-scribe` also passes:
+
+```text
+--agent yt-scribe-transcript-polisher
+```
+
 The final text is read from OpenCode JSON events. Run `yt-scribe doctor` to check whether `codex` and `opencode` are available and whether their auth commands report usable local configuration.
 
 If the optional plugin skills are installed, the inner agent uses `yt-scribe-transcript-polisher` for the transcript rewrite. The skill has harness-specific notes so Codex and OpenCode do not need to read each other's command details.
@@ -228,20 +251,20 @@ If the optional plugin skills are installed, the inner agent uses `yt-scribe-tra
 
 This repository also contains plugin skills:
 
-- `skills/yt-scribe`: for an outer agent that wants to use the CLI.
+- `.opencode/agents/yt-scribe.md`: OpenCode-facing outer agent.
+- `.opencode/agents/yt-scribe-transcript-polisher.md`: OpenCode-facing inner polishing agent.
+- `skills/yt-scribe`: plugin-facing outer skill for an agent that wants to use the CLI.
 - `skills/yt-scribe/harness/codex.md`: Codex-specific outer CLI instructions.
 - `skills/yt-scribe/harness/opencode.md`: OpenCode-specific outer CLI instructions.
-- `skills/yt-scribe-transcript-polisher`: for the inner agent that receives transcript text and rewrites it.
-- `skills/yt-scribe-transcript-polisher/harness/codex.md`: Codex stdin polishing instructions.
-- `skills/yt-scribe-transcript-polisher/harness/opencode.md`: OpenCode attached-file polishing instructions.
+- `.agents/skills/yt-scribe-transcript-polisher`: inner agent skill for transcript rewriting.
+- `.agents/skills/yt-scribe-transcript-polisher/harness/codex.md`: Codex stdin polishing instructions.
+- `.agents/skills/yt-scribe-transcript-polisher/harness/opencode.md`: OpenCode attached-file polishing instructions.
 
 The split matters. The outer agent fetches, saves, and chains commands. The inner agent only transforms transcript text and should not fetch videos or run shell commands.
 
-The local personal plugin scaffold is created at:
+When the CLI is installed globally, project-local `.agents` and `.opencode` folders are not automatically available to inner agent runs in other projects. Run `yt-scribe install-harness-assets` to install the inner assets globally.
 
-```text
-C:\Users\berka\plugins\yt-scribe
-```
+The plugin files live in this repository under `.codex-plugin/` and `skills/`.
 
 ## Notes
 

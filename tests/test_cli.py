@@ -85,3 +85,25 @@ def test_config_command_persists_default_agent_harness(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["config"]["default_agent_harness"] == "opencode"
     assert payload["config"]["effective_agent_harness"] == "opencode"
+
+
+def test_install_harness_assets_writes_global_agent_files(tmp_path):
+    env = os.environ.copy()
+    env["YT_SCRIBE_AGENTS_SKILLS_DIR"] = str(tmp_path / "agent-skills")
+    env["YT_SCRIBE_OPENCODE_AGENTS_DIR"] = str(tmp_path / "opencode-agents")
+
+    result = run_cli("--json", "install-harness-assets", env=env)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert (
+        tmp_path
+        / "agent-skills"
+        / "yt-scribe-transcript-polisher"
+        / "SKILL.md"
+    ).exists()
+    assert (tmp_path / "opencode-agents" / "yt-scribe.md").exists()
+    assert (
+        tmp_path / "opencode-agents" / "yt-scribe-transcript-polisher.md"
+    ).exists()

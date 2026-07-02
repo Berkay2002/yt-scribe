@@ -28,7 +28,7 @@ Verify the command exists and the local harness setup is available:
 yt-scribe --json doctor
 ```
 
-If `yt-scribe` is missing, check whether the repo exists at `C:\Users\berka\code\clis\yt-scribe` and run its `install-local.ps1`.
+If `yt-scribe` is missing, find the local checkout or install from the public repository, then run `install-local.ps1` on Windows if you want the wrapper on PATH.
 
 ## Workflow
 

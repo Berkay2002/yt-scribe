@@ -133,6 +133,7 @@ class YtScribeTests(unittest.TestCase):
 
         with (
             patch.object(yt_scribe, "command_path", return_value="opencode"),
+            patch.object(yt_scribe, "opencode_agent_available", return_value=True),
             patch.object(yt_scribe.subprocess, "run", side_effect=fake_run),
         ):
             result = yt_scribe.run_agent_polish(
@@ -153,6 +154,10 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(calls[0][0][2], "Polish the transcript.")
         self.assertIn("--dir", calls[0][0])
         self.assertIn("--format", calls[0][0])
+        self.assertEqual(
+            calls[0][0][calls[0][0].index("--agent") + 1],
+            "yt-scribe-transcript-polisher",
+        )
         self.assertIn("--model", calls[0][0])
 
     def test_doctor_reports_codex_and_opencode_harnesses(self):
@@ -192,6 +197,26 @@ class YtScribeTests(unittest.TestCase):
                         argparse.Namespace(agent_harness="codex"),
                     ),
                     "codex",
+                )
+
+    def test_opencode_agent_available_checks_global_agent_dir(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            agent_dir = Path(tmp_dir) / "opencode-agents"
+            agent_dir.mkdir()
+            (agent_dir / "yt-scribe-transcript-polisher.md").write_text(
+                "agent",
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"YT_SCRIBE_OPENCODE_AGENTS_DIR": str(agent_dir)},
+            ):
+                self.assertTrue(
+                    yt_scribe.opencode_agent_available(
+                        "yt-scribe-transcript-polisher",
+                        cwd=tmp_dir,
+                    )
                 )
 
 

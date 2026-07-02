@@ -15,4 +15,4 @@ Or persist it as the default:
 yt-scribe config set default-agent-harness opencode
 ```
 
-With OpenCode, the CLI invokes `opencode run` and attaches the transcript as a temp file. The inner polishing prompt asks for the `yt-scribe-transcript-polisher` skill and its OpenCode harness instructions. Prefer `--out` when the user expects a file.
+With OpenCode, the CLI invokes `opencode run` and attaches the transcript as a temp file. When `.opencode/agents/yt-scribe-transcript-polisher.md` is discoverable, the CLI passes `--agent yt-scribe-transcript-polisher`. The inner polishing skill lives in `.agents/skills/yt-scribe-transcript-polisher`. Prefer `--out` when the user expects a file.

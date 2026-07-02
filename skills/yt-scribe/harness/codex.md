@@ -9,4 +9,4 @@ yt-scribe --json run "<youtube-url>"
 yt-scribe --json polish transcript.txt --style summary --out summary.md
 ```
 
-With Codex, the CLI invokes `codex exec` in read-only, ephemeral mode and passes the transcript through stdin. The inner polishing prompt asks for the `yt-scribe-transcript-polisher` skill and its Codex harness instructions. The CLI writes final Codex output through `--output-last-message`, so prefer `--out` when the user expects a file.
+With Codex, the CLI invokes `codex exec` in read-only, ephemeral mode and passes the transcript through stdin. The inner polishing prompt asks for the `yt-scribe-transcript-polisher` skill from `.agents/skills` and its Codex harness instructions. The CLI writes final Codex output through `--output-last-message`, so prefer `--out` when the user expects a file.
