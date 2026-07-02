@@ -33,6 +33,7 @@ def test_polish_help_exposes_agent_harness_selection():
 
     assert result.returncode == 0
     assert "--agent-harness" in result.stdout
+    assert "--focus" in result.stdout
     assert "opencode" in result.stdout
 
 
@@ -107,3 +108,26 @@ def test_install_skills_writes_global_agent_files(tmp_path):
     assert (
         tmp_path / "opencode-agents" / "yt-scribe-transcript-polisher.md"
     ).exists()
+
+
+def test_setup_installs_support_files_and_reports_next_command(tmp_path):
+    env = os.environ.copy()
+    env["PATH"] = ""
+    env["YT_SCRIBE_AGENTS_SKILLS_DIR"] = str(tmp_path / "agent-skills")
+    env["YT_SCRIBE_OPENCODE_AGENTS_DIR"] = str(tmp_path / "opencode-agents")
+    env["YT_SCRIBE_CONFIG"] = str(tmp_path / "config.json")
+
+    result = run_cli("--json", "setup", env=env)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["setup"]["next"]["run"] == "yt-scribe run <youtube-url>"
+    assert payload["setup"]["doctor"]["install"]["resolved_command"] is None
+    assert (
+        tmp_path
+        / "agent-skills"
+        / "yt-scribe-transcript-polisher"
+        / "SKILL.md"
+    ).exists()
+    assert (tmp_path / "opencode-agents" / "yt-scribe.md").exists()

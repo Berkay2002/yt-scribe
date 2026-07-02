@@ -9,6 +9,12 @@ $Ps1 = Join-Path $Bin "yt-scribe.ps1"
 $Cmd = Join-Path $Bin "yt-scribe.cmd"
 $Script = Join-Path $Repo "yt_scribe.py"
 
+if ($env:VIRTUAL_ENV) {
+  & "$Python" -m pip install -e "$Repo"
+} else {
+  & "$Python" -m pip install --user -e "$Repo"
+}
+
 @"
 & "$Python" "$Script" @args
 "@ | Set-Content -Encoding UTF8 -Path $Ps1
@@ -20,3 +26,4 @@ $Script = Join-Path $Repo "yt_scribe.py"
 Write-Host "Installed yt-scribe wrappers:"
 Write-Host "  $Ps1"
 Write-Host "  $Cmd"
+& "$Python" -m yt_scribe setup

@@ -6,6 +6,7 @@ permission:
   bash:
     "*": ask
     "yt-scribe *": allow
+    "python -m yt_scribe *": allow
     "python yt_scribe.py *": allow
     "python -m pytest *": allow
     "python -m ruff *": allow
@@ -23,12 +24,14 @@ Default workflow:
 yt-scribe --json inspect "<youtube-url>"
 yt-scribe --json fetch "<youtube-url>" --lang en --out transcript.txt
 yt-scribe --json polish transcript.txt --agent-harness opencode --style notes --out notes.md
+yt-scribe --json polish transcript.txt --focus "Focus on decisions and risks" --out notes.md
 ```
 
 One-command workflow:
 
 ```sh
 yt-scribe --json run "<youtube-url>" --agent-harness opencode
+yt-scribe --json run "<youtube-url>" --focus "Keep only action items"
 ```
 
-Do not bypass private, disabled, or unavailable captions. Do not pass secrets in `--instruction` or prompt files.
+Do not bypass private, disabled, or unavailable captions. Do not pass secrets in `--focus`, `--instruction`, or prompt files.

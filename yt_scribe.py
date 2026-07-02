@@ -12,6 +12,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -93,6 +95,9 @@ Read exactly one harness file based on how the transcript was provided:
 
 - Return only the requested polished transcript output.
 - Preserve the speaker's meaning, sequence, and concrete claims.
+- Honor custom user instructions passed by `yt-scribe`. When they conflict with
+  the selected output mode, the custom instructions win unless they would require
+  adding unsupported facts.
 - Remove caption artifacts, repeated fragments, filler, obvious false starts, and timestamp residue.
 - Do not add facts, examples, citations, links, or claims that are not in the transcript.
 - Do not mention that you used a skill, a harness, stdin, an attached file, or a cleaning process.
@@ -150,6 +155,7 @@ permission:
   bash:
     "*": ask
     "yt-scribe *": allow
+    "python -m yt_scribe *": allow
     "python yt_scribe.py *": allow
     "python -m pytest *": allow
     "python -m ruff *": allow
@@ -170,16 +176,18 @@ Default workflow:
 yt-scribe --json inspect "<youtube-url>"
 yt-scribe --json fetch "<youtube-url>" --lang en --out transcript.txt
 yt-scribe --json polish transcript.txt --agent-harness opencode --style notes --out notes.md
+yt-scribe --json polish transcript.txt --focus "Focus on decisions and risks" --out notes.md
 ```
 
 One-command workflow:
 
 ```sh
 yt-scribe --json run "<youtube-url>" --agent-harness opencode
+yt-scribe --json run "<youtube-url>" --focus "Keep only action items"
 ```
 
 Do not bypass private, disabled, or unavailable captions. Do not pass secrets in
-`--instruction` or prompt files.
+`--focus`, `--instruction`, or prompt files.
 """,
     ".opencode/agents/yt-scribe-transcript-polisher.md": """---
 description: Polish transcript text attached by yt-scribe.
@@ -205,6 +213,9 @@ Rules:
 
 - Return only the requested polished transcript output.
 - Preserve the speaker's meaning, sequence, and concrete claims.
+- Honor custom user instructions passed by `yt-scribe`. When they conflict with
+  the selected output mode, the custom instructions win unless they would require
+  adding unsupported facts.
 - Remove caption artifacts, repeated fragments, filler, obvious false starts, and timestamp residue.
 - Do not add facts, examples, citations, links, or claims that are not in the transcript.
 - Do not mention that you used an agent, a skill, OpenCode, an attached file, or a cleaning process.
@@ -218,6 +229,53 @@ class CliError(Exception):
         super().__init__(message)
         self.code = code
         self.details = details or {}
+
+
+@dataclass
+class PolishInstruction:
+    text: str
+    mode: str
+    sources: list[str]
+
+
+class ProgressWait:
+    def __init__(self, reporter: ProgressReporter, message: str, interval_seconds: int = 15):
+        self.reporter = reporter
+        self.message = message
+        self.interval_seconds = interval_seconds
+        self.started_at = 0.0
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def __enter__(self) -> ProgressWait:
+        self.started_at = time.monotonic()
+        self.reporter.message(self.message)
+        if self.reporter.enabled:
+            self.thread = threading.Thread(target=self._heartbeat, daemon=True)
+            self.thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=0.2)
+
+    def _heartbeat(self) -> None:
+        while not self.stop_event.wait(self.interval_seconds):
+            elapsed = int(time.monotonic() - self.started_at)
+            self.reporter.message(f"{self.message} ({elapsed}s elapsed)")
+
+
+class ProgressReporter:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def message(self, text: str) -> None:
+        if self.enabled:
+            print(f"{COMMAND_NAME}: {text}", file=sys.stderr, flush=True)
+
+    def wait(self, message: str) -> ProgressWait:
+        return ProgressWait(self, message)
 
 
 @dataclass
@@ -681,6 +739,17 @@ def install_skills() -> dict[str, Any]:
     }
 
 
+def setup_payload() -> dict[str, Any]:
+    return {
+        "skills": install_skills(),
+        "doctor": doctor_payload(),
+        "next": {
+            "run": "yt-scribe run <youtube-url>",
+            "check": "yt-scribe doctor",
+        },
+    }
+
+
 def skills_payload() -> dict[str, Any]:
     targets = harness_asset_targets()
     return {
@@ -866,6 +935,7 @@ def run_codex_polish(
     out_path: str | None,
     model: str | None,
     cwd: str | None,
+    progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     codex = command_path("codex")
     if not codex:
@@ -889,14 +959,25 @@ def run_codex_polish(
             command.extend(["--model", model])
         command.append(instruction)
 
-        result = subprocess.run(
-            command,
-            input=transcript_text,
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            check=False,
-        )
+        if progress:
+            with progress.wait("Running Codex polisher"):
+                result = subprocess.run(
+                    command,
+                    input=transcript_text,
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    check=False,
+                )
+        else:
+            result = subprocess.run(
+                command,
+                input=transcript_text,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
         if result.returncode != 0:
             raise CliError(
                 "codex exec failed",
@@ -925,6 +1006,7 @@ def run_opencode_polish(
     out_path: str | None,
     model: str | None,
     cwd: str | None,
+    progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     opencode = command_path("opencode")
     if not opencode:
@@ -949,13 +1031,23 @@ def run_opencode_polish(
         if model:
             command.extend(["--model", model])
 
-        result = subprocess.run(
-            command,
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            check=False,
-        )
+        if progress:
+            with progress.wait("Running OpenCode polisher"):
+                result = subprocess.run(
+                    command,
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    check=False,
+                )
+        else:
+            result = subprocess.run(
+                command,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
         if result.returncode != 0:
             raise CliError(
                 "opencode run failed",
@@ -1003,11 +1095,12 @@ def run_agent_polish(
     model: str | None,
     cwd: str | None,
     harness: str,
+    progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
     if harness == "codex":
-        return run_codex_polish(transcript_text, instruction, out_path, model, cwd)
+        return run_codex_polish(transcript_text, instruction, out_path, model, cwd, progress)
     if harness == "opencode":
-        return run_opencode_polish(transcript_text, instruction, out_path, model, cwd)
+        return run_opencode_polish(transcript_text, instruction, out_path, model, cwd, progress)
     raise CliError(f"Unsupported agent harness: {harness}", "unsupported_agent_harness")
 
 
@@ -1042,12 +1135,74 @@ def style_instruction(style: str, harness: str) -> str:
     )
 
 
-def read_instruction(args: argparse.Namespace, harness: str) -> str:
+def custom_instruction_parts(args: argparse.Namespace) -> tuple[list[str], list[str]]:
+    parts: list[str] = []
+    sources: list[str] = []
+
+    for focus in getattr(args, "focus", None) or []:
+        focus = focus.strip()
+        if focus:
+            parts.append(focus)
+            sources.append("--focus")
+
+    for focus_file in getattr(args, "focus_file", None) or []:
+        content = Path(focus_file).expanduser().read_text(encoding="utf-8").strip()
+        if content:
+            parts.append(content)
+            sources.append("--focus-file")
+
+    return parts, sources
+
+
+def resolve_instruction(args: argparse.Namespace, harness: str) -> PolishInstruction:
+    replacement_sources = [
+        source
+        for source, value in (
+            ("--instruction", getattr(args, "instruction", None)),
+            ("--prompt-file", getattr(args, "prompt_file", None)),
+        )
+        if value
+    ]
+    custom_parts, custom_sources = custom_instruction_parts(args)
+
+    if len(replacement_sources) > 1:
+        raise CliError(
+            "Use only one full prompt replacement option: --instruction or --prompt-file",
+            "conflicting_instruction_options",
+        )
+    if replacement_sources and custom_parts:
+        raise CliError(
+            "Use --focus/--focus-file to extend the built-in prompt, or "
+            "--instruction/--prompt-file to replace it, not both.",
+            "conflicting_instruction_options",
+        )
+
     if getattr(args, "prompt_file", None):
-        return Path(args.prompt_file).expanduser().read_text(encoding="utf-8").strip()
+        text = Path(args.prompt_file).expanduser().read_text(encoding="utf-8").strip()
+        return PolishInstruction(text=text, mode="replace", sources=["--prompt-file"])
     if getattr(args, "instruction", None):
-        return args.instruction
-    return style_instruction(getattr(args, "style", "notes"), harness)
+        return PolishInstruction(
+            text=args.instruction.strip(),
+            mode="replace",
+            sources=["--instruction"],
+        )
+
+    text = style_instruction(getattr(args, "style", "notes"), harness)
+    if not custom_parts:
+        return PolishInstruction(text=text, mode="style", sources=["--style"])
+
+    custom_text = "\n\n".join(custom_parts)
+    text += (
+        "\n\nCustom user instructions for this run:\n"
+        "Follow these instructions even when they narrow or change the selected "
+        "style. They do not allow adding facts that are not in the transcript.\n\n"
+        f"{custom_text}"
+    )
+    return PolishInstruction(text=text, mode="custom", sources=custom_sources)
+
+
+def read_instruction(args: argparse.Namespace, harness: str) -> str:
+    return resolve_instruction(args, harness).text
 
 
 def limit_text(text: str, max_chars: int) -> str:
@@ -1060,7 +1215,30 @@ def selected_agent_harness(args: argparse.Namespace) -> str:
     return args.agent_harness or effective_agent_harness()
 
 
+def harness_label(harness: str) -> str:
+    return {"codex": "Codex", "opencode": "OpenCode"}.get(harness, harness)
+
+
 def handle_args(args: argparse.Namespace) -> int:
+    if args.command == "setup":
+        payload = {"ok": True, "setup": setup_payload()}
+        doctor = payload["setup"]["doctor"]
+        harnesses = doctor["agent_harness"]["harnesses"]
+        text = (
+            f"Installed yt-scribe support files:\n"
+            f"  agent skills: {payload['setup']['skills']['agents_skills_dir']}\n"
+            f"  OpenCode agents: {payload['setup']['skills']['opencode_agents_dir']}\n"
+            f"Agent harnesses:\n"
+            f"  default: {doctor['agent_harness']['default']}\n"
+            f"  codex: {'found' if harnesses['codex']['available'] else 'not found'}\n"
+            f"  opencode: {'found' if harnesses['opencode']['available'] else 'not found'}\n"
+            f"Command on PATH: {'yes' if doctor['install']['resolved_command'] else 'no'}\n"
+            f"Next:\n"
+            f"  yt-scribe run \"<youtube-url>\"\n"
+        )
+        emit(payload, args.json, text)
+        return 0
+
     if args.command == "install-skills":
         payload = {"ok": True, "skills": install_skills()}
         text = (
@@ -1152,27 +1330,35 @@ def handle_args(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "polish":
+        progress = ProgressReporter(not args.json)
+        progress.message(f"Reading transcript from {Path(args.file).expanduser()}")
         transcript_text = Path(args.file).expanduser().read_text(encoding="utf-8")
         transcript_text = limit_text(transcript_text, args.max_chars)
+        progress.message(f"Loaded transcript ({len(transcript_text)} chars)")
         out_path = (
             args.out
             if args.stdout
             else args.out or str(default_polish_output_path(args.file, args.style))
         )
         harness = selected_agent_harness(args)
+        instruction = resolve_instruction(args, harness)
+        progress.message(f"Using {harness_label(harness)}")
         result = run_agent_polish(
-            transcript_text,
-            read_instruction(args, harness),
-            out_path,
-            args.model,
-            args.cd,
-            harness,
+            transcript_text=transcript_text,
+            instruction=instruction.text,
+            out_path=out_path,
+            model=args.model,
+            cwd=args.cd,
+            harness=harness,
+            progress=progress,
         )
         payload = {
             "ok": True,
             "polish": {
                 "input_path": str(Path(args.file).expanduser().resolve()),
                 "style": args.style,
+                "instruction_mode": instruction.mode,
+                "instruction_sources": instruction.sources,
                 "agent_harness": result["harness"],
                 "output_path": result["output_path"],
                 "chars": result["chars"],
@@ -1187,23 +1373,38 @@ def handle_args(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "run":
+        progress = ProgressReporter(not args.json)
+        progress.message(f"Fetching transcript for {extract_video_id(args.url)}")
         transcript = fetch_transcript(args.url, args.lang)
+        segment_count = len(transcript["segments"])
+        segment_word = "segment" if segment_count == 1 else "segments"
+        progress.message(
+            f"Fetched {segment_count} transcript {segment_word} "
+            f"({len(transcript['text'])} chars)"
+        )
         rendered = render_transcript(transcript, args.transcript_format)
         transcript_path = write_text(args.transcript, rendered)
+        if transcript_path:
+            progress.message(f"Wrote raw transcript to {transcript_path}")
         transcript_text = limit_text(transcript["text"], args.max_chars)
+        if args.max_chars and len(transcript["text"]) > len(transcript_text):
+            progress.message(f"Truncated transcript to {len(transcript_text)} chars")
         out_path = (
             args.out
             if args.stdout
             else args.out or str(default_run_output_path(transcript["video_id"], args.style))
         )
         harness = selected_agent_harness(args)
+        instruction = resolve_instruction(args, harness)
+        progress.message(f"Using {harness_label(harness)}")
         result = run_agent_polish(
-            transcript_text,
-            read_instruction(args, harness),
-            out_path,
-            args.model,
-            args.cd,
-            harness,
+            transcript_text=transcript_text,
+            instruction=instruction.text,
+            out_path=out_path,
+            model=args.model,
+            cwd=args.cd,
+            harness=harness,
+            progress=progress,
         )
         payload = {
             "ok": True,
@@ -1213,6 +1414,8 @@ def handle_args(args: argparse.Namespace) -> int:
                 "language": transcript["language"],
                 "segments": len(transcript["segments"]),
                 "style": args.style,
+                "instruction_mode": instruction.mode,
+                "instruction_sources": instruction.sources,
                 "agent_harness": result["harness"],
                 "transcript_path": transcript_path,
                 "output_path": result["output_path"],
@@ -1264,8 +1467,27 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="print polished output instead of writing a file",
     )
-    parser.add_argument("--instruction", help="replace the built-in Codex prompt")
-    parser.add_argument("--prompt-file", help="read the Codex prompt from a file")
+    parser.add_argument(
+        "--focus",
+        action="append",
+        help=(
+            "add custom instructions for this run; can be passed more than once "
+            "and overrides --style where they conflict"
+        ),
+    )
+    parser.add_argument(
+        "--focus-file",
+        action="append",
+        help="read additional custom instructions from a file",
+    )
+    parser.add_argument(
+        "--instruction",
+        help="advanced: replace the entire built-in polishing prompt",
+    )
+    parser.add_argument(
+        "--prompt-file",
+        help="advanced: read the full replacement prompt from a file",
+    )
     parser.add_argument(
         "--agent-harness",
         choices=AGENT_HARNESSES,
@@ -1323,6 +1545,10 @@ ai contract:
     )
 
     subparsers.add_parser("doctor", help="check Python, agent harnesses, skills, and PATH setup")
+    subparsers.add_parser(
+        "setup",
+        help="install support files and print the next command",
+    )
     subparsers.add_parser(
         "install-skills",
         help="install global yt-scribe skills and OpenCode agents",

@@ -17,6 +17,7 @@ Rules:
 
 - Return only the requested polished transcript output.
 - Preserve the speaker's meaning, sequence, and concrete claims.
+- Honor custom user instructions passed by `yt-scribe`. When they conflict with the selected output mode, the custom instructions win unless they would require adding unsupported facts.
 - Remove caption artifacts, repeated fragments, filler, obvious false starts, and timestamp residue.
 - Do not add facts, examples, citations, links, or claims that are not in the transcript.
 - Do not mention that you used an agent, a skill, OpenCode, an attached file, or a cleaning process.

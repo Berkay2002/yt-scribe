@@ -17,37 +17,50 @@ It uses public YouTube caption tracks when they are available through `youtube-t
 
 ## Install
 
-From GitHub:
+Install from GitHub and set up the agent support files:
 
 ```sh
-pip install git+https://github.com/Berkay2002/yt-scribe.git
+python -m pip install --upgrade git+https://github.com/Berkay2002/yt-scribe.git && python -m yt_scribe setup
 ```
 
-For local development or immediate use from a checkout:
+On Windows PowerShell:
+
+```powershell
+py -m pip install --upgrade git+https://github.com/Berkay2002/yt-scribe.git; py -m yt_scribe setup
+```
+
+Then use it:
+
+```sh
+yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+For local development or immediate use from a checkout, run the local installer. It installs the package in editable mode, creates the wrapper, and runs `yt-scribe setup` for you.
 
 ```sh
 sh ./install-local.sh
 ```
 
-On Windows, use PowerShell:
+On Windows PowerShell:
 
 ```powershell
 .\install-local.ps1
 ```
 
-Check your setup:
+If the `yt-scribe` command is not on PATH after a `pip` install, use the module form:
 
 ```sh
+python -m yt_scribe run "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+You can re-run setup or inspect the environment later:
+
+```sh
+yt-scribe setup
 yt-scribe doctor
 ```
 
-Install global skills:
-
-```sh
-yt-scribe install-skills
-```
-
-This copies the transcript-polisher skill to `~/.agents/skills/yt-scribe-transcript-polisher` and the OpenCode agents to OpenCode's global agents directory. This is needed when the globally installed CLI is used from projects that do not contain this repository's `.agents` or `.opencode` folders.
+`yt-scribe setup` copies the transcript-polisher skill to `~/.agents/skills/yt-scribe-transcript-polisher` and the OpenCode agents to OpenCode's global agents directory. This is needed when the globally installed CLI is used from projects that do not contain this repository's `.agents` or `.opencode` folders.
 
 `yt-scribe` uses `youtube-transcript-api` for caption access. Maintainers can install test and lint tools with:
 
@@ -104,6 +117,12 @@ Polish an existing transcript:
 yt-scribe polish transcript.txt --style summary --out summary.md
 ```
 
+Tell the polisher what to focus on:
+
+```sh
+yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID" --focus "Keep only decisions, risks, and action items"
+```
+
 ## Lifecycle
 
 `yt-scribe` is easiest to understand as a small pipeline:
@@ -127,6 +146,15 @@ yt-scribe lifecycle
 `doctor`
 
 Checks Python, agent harness availability, PATH installation, config, and the expected lifecycle.
+
+`setup`
+
+Installs the global agent support files and prints the next command to run.
+
+```sh
+yt-scribe setup
+yt-scribe --json setup
+```
 
 `inspect <url>`
 
@@ -153,8 +181,16 @@ yt-scribe polish transcript.txt --style clean --out clean.txt
 yt-scribe polish transcript.txt --style notes --out notes.md
 yt-scribe polish transcript.txt --style summary --out summary.md
 yt-scribe polish transcript.txt --style article --out article.md
+yt-scribe polish transcript.txt --focus "Focus on concrete takeaways" --out notes.md
+yt-scribe polish transcript.txt --focus-file instructions.md --out notes.md
 yt-scribe polish transcript.txt --agent-harness opencode --out notes.md
 ```
+
+Use `--focus` or `--focus-file` for custom instructions that should keep the
+normal transcript-polisher prompt. Custom focus instructions override `--style`
+where they conflict, but they do not allow the agent to add facts that are not in
+the transcript. `--instruction` and `--prompt-file` are advanced options that
+replace the whole polishing prompt.
 
 `run <url>`
 
@@ -163,10 +199,15 @@ Fetches the transcript and polishes it in one command.
 ```sh
 yt-scribe run "<url>"
 yt-scribe run "<url>" --style summary
+yt-scribe run "<url>" --focus "Extract only action items and owner names"
 yt-scribe run "<url>" --stdout
 yt-scribe run "<url>" --transcript transcript.txt --out notes.md
 yt-scribe run "<url>" --agent-harness opencode
 ```
+
+For normal human runs, fetch and polish progress is written to stderr. The final
+path or polished text stays on stdout. `--json` suppresses progress and keeps
+stdout machine-readable.
 
 `config`
 
@@ -182,7 +223,7 @@ Without config, `yt-scribe` uses Codex. A config default changes future `polish`
 
 `install-skills`
 
-Installs the transcript-polisher skill and OpenCode agents into global user-level locations.
+Installs only the transcript-polisher skill and OpenCode agents into global user-level locations. Most users should run `yt-scribe setup` instead.
 
 ```sh
 yt-scribe install-skills
@@ -256,6 +297,11 @@ When the project-local OpenCode agent is available, `yt-scribe` also passes:
 
 The final text is read from OpenCode JSON events. Run `yt-scribe doctor` to check whether `codex` and `opencode` are available and whether their auth commands report usable local configuration.
 
+For the default prompt, `--style` selects the output mode and `--focus` appends
+run-specific instructions. JSON output includes `instruction_mode` and
+`instruction_sources` so agents can tell whether the run used only the selected
+style, added custom focus instructions, or replaced the prompt.
+
 There are two skills:
 
 - `yt-scribe`: teaches an agent how to use the CLI correctly.
@@ -278,7 +324,7 @@ This repository also contains plugin skills:
 
 The split matters. One skill explains how to run the CLI correctly. The transcript-polisher skill is only for the agent started by the CLI after the transcript has already been fetched.
 
-When the CLI is installed globally, project-local `.agents` and `.opencode` folders are not automatically available in other projects. Run `yt-scribe install-skills` to install the skill files globally.
+When the CLI is installed globally, project-local `.agents` and `.opencode` folders are not automatically available in other projects. Run `yt-scribe setup` to install the skill files globally.
 
 The plugin files live in this repository under `.codex-plugin/` and `skills/`.
 

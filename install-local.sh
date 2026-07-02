@@ -18,6 +18,12 @@ mkdir -p "$bin_dir"
 wrapper="${bin_dir}/yt-scribe"
 script="${repo}/yt_scribe.py"
 
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+  "$python_bin" -m pip install -e "$repo"
+else
+  "$python_bin" -m pip install --user -e "$repo"
+fi
+
 cat >"$wrapper" <<EOF
 #!/usr/bin/env sh
 exec "$python_bin" "$script" "\$@"
@@ -27,6 +33,7 @@ chmod +x "$wrapper"
 
 echo "Installed yt-scribe wrapper:"
 echo "  $wrapper"
+"$python_bin" -m yt_scribe setup
 case ":${PATH:-}:" in
   *":$bin_dir:"*) ;;
   *)

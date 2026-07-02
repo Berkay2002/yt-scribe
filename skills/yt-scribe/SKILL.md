@@ -28,7 +28,13 @@ Verify the command exists and the local harness setup is available:
 yt-scribe --json doctor
 ```
 
-If `yt-scribe` is missing, install it from the public repository. From a checkout, run `sh ./install-local.sh` on Linux or macOS, or `.\install-local.ps1` on Windows, if you want the wrapper on PATH.
+If `yt-scribe` is missing, install and set it up from the public repository:
+
+```sh
+python -m pip install --upgrade git+https://github.com/Berkay2002/yt-scribe.git && python -m yt_scribe setup
+```
+
+From a checkout, run `sh ./install-local.sh` on Linux or macOS, or `.\install-local.ps1` on Windows. The local installers create the wrapper and run setup.
 
 ## Workflow
 
@@ -38,12 +44,14 @@ For a new YouTube link:
 yt-scribe --json inspect "<youtube-url>"
 yt-scribe --json fetch "<youtube-url>" --lang en --out transcript.txt
 yt-scribe --json polish transcript.txt --style notes --out notes.md
+yt-scribe --json polish transcript.txt --focus "Focus on decisions and risks" --out notes.md
 ```
 
 For the one-command path:
 
 ```sh
 yt-scribe --json run "<youtube-url>"
+yt-scribe --json run "<youtube-url>" --focus "Keep only action items"
 ```
 
 Use styles intentionally:
@@ -53,6 +61,10 @@ Use styles intentionally:
 - `clean`: cleaned transcript text with filler removed.
 - `article`: readable article-style prose.
 
+Use `--focus "..."` or `--focus-file instructions.md` when the user wants
+specific emphasis while keeping the normal harness prompt. Use `--instruction`
+or `--prompt-file` only when the user needs to replace the whole polishing prompt.
+
 ## Safety
 
 - Use `inspect` before assuming captions exist.
@@ -60,4 +72,4 @@ Use styles intentionally:
 - Do not bypass private, disabled, or unavailable captions.
 - Do not use `raw --body` unless high-level commands are insufficient.
 - Do not run destructive shell commands as part of this workflow.
-- Do not pass secrets in `--instruction` or prompt files.
+- Do not pass secrets in `--focus`, `--instruction`, or prompt files.
