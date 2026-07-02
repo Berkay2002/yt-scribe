@@ -1,11 +1,16 @@
 ---
 name: yt-scribe-transcript-polisher
-description: Use when `yt-scribe polish` or `yt-scribe run` invokes an agent to transform a YouTube transcript into cleaned text, notes, a summary, or article-style prose. This skill is for transcript polishing only, not for fetching captions or running the CLI.
+description: Use when `yt-scribe polish` or `yt-scribe run` invokes an agent to
+  transform a YouTube transcript into cleaned text, notes, a summary, or
+  article-style prose. This skill is for transcript polishing only, not for
+  fetching captions or running the CLI.
 ---
 
 # yt-scribe Transcript Polisher
 
-Transform the transcript text already provided by `yt-scribe`. This skill is for the agent started by the CLI after the transcript has already been fetched. Do not fetch the video, inspect unrelated files, run shell commands, or call `yt-scribe`.
+Transform the transcript text already provided by `yt-scribe`. This skill is for the
+agent started by the CLI after the transcript has already been fetched. Do not fetch
+the video, inspect unrelated files, run shell commands, or call `yt-scribe`.
 
 Read exactly one harness file based on how the transcript was provided:
 
@@ -16,25 +21,35 @@ Read exactly one harness file based on how the transcript was provided:
 
 - Return only the requested polished transcript output.
 - Preserve the speaker's meaning, sequence, and concrete claims.
-- Honor custom user instructions passed by `yt-scribe`. When they conflict with the selected output mode, the custom instructions win unless they would require adding unsupported facts.
+- Honor custom user instructions passed by `yt-scribe`. When they conflict with
+  the selected output mode, the custom instructions win unless they would require
+  adding unsupported facts.
 - Remove caption artifacts, repeated fragments, filler, obvious false starts,
   and timestamp residue unless timestamp grounding was requested.
 - When timestamp grounding is requested, preserve useful timestamp anchors from
   the provided transcript near important claims. Do not invent timestamps.
 - Do not add facts, examples, citations, links, or claims that are not in the transcript.
-- Do not mention that you used a skill, a harness, stdin, an attached file, or a cleaning process.
-- If the transcript is empty or unusable, say that the transcript content is missing or unusable.
+- Do not mention that you used a skill, a harness, stdin, an attached file, or a
+  cleaning process.
+- If the transcript is empty or unusable, say that the transcript content is
+  missing or unusable.
 
 ## Output Modes
 
 For `clean`, produce lightly edited prose close to the original transcript.
 
-For `notes`, produce markdown notes with short headings and bullets. Keep the structure useful for review, not overly nested.
+For `notes`, produce markdown notes with short headings and bullets. Keep the
+structure useful for review, not overly nested.
 
-For `summary`, produce a concise markdown summary with the main ideas, key details, and action items when present.
+For `summary`, produce a concise markdown summary with the main ideas, key details,
+and action items when present.
 
-For `article`, produce readable article-style markdown while preserving the original argument and order.
+For `article`, produce readable article-style markdown while preserving the original
+argument and order.
 
 ## Quality Bar
 
-Prefer boring accuracy over elegant rewriting. When a phrase is ambiguous, keep it closer to the original instead of guessing. Preserve names, commands, numbers, dates, and technical terms exactly unless the transcript clearly contains a captioning artifact.
+Prefer boring accuracy over elegant rewriting. When a phrase is ambiguous, keep it
+closer to the original instead of guessing. Preserve names, commands, numbers,
+dates, and technical terms exactly unless the transcript clearly contains a
+captioning artifact.

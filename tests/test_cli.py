@@ -135,6 +135,22 @@ def test_config_profile_set_and_get(tmp_path):
         "--template",
         "lecture",
         "--timestamps",
+        "--cache-dir",
+        ".yt-scribe/cache",
+        "--resume",
+        "--transcript-format",
+        "json",
+        "--out",
+        "notes.md",
+        "--bundle-dir",
+        ".yt-scribe/runs/current",
+        "--out-dir",
+        "batch-notes",
+        "--manifest",
+        "batch-manifest.json",
+        "--stdout",
+        "--chunk-chars",
+        "5000",
         env=env,
     )
 
@@ -142,6 +158,15 @@ def test_config_profile_set_and_get(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["config"]["profiles"]["research"]["style"] == "summary"
     assert payload["config"]["profiles"]["research"]["langs"] == ["en", "sv"]
+    assert payload["config"]["profiles"]["research"]["cache_dir"] == ".yt-scribe/cache"
+    assert payload["config"]["profiles"]["research"]["resume"] is True
+    assert payload["config"]["profiles"]["research"]["transcript_format"] == "json"
+    assert payload["config"]["profiles"]["research"]["out"] == "notes.md"
+    assert payload["config"]["profiles"]["research"]["bundle_dir"] == ".yt-scribe/runs/current"
+    assert payload["config"]["profiles"]["research"]["out_dir"] == "batch-notes"
+    assert payload["config"]["profiles"]["research"]["manifest"] == "batch-manifest.json"
+    assert payload["config"]["profiles"]["research"]["stdout"] is True
+    assert payload["config"]["profiles"]["research"]["chunk_chars"] == 5000
 
     result = run_cli("--json", "config", "profile", "get", "research", env=env)
 

@@ -78,6 +78,12 @@ class FetchBlockedTranscriptApi:
 
 
 class YtScribeTests(unittest.TestCase):
+    def test_embedded_skill_assets_match_source_files(self):
+        for relative_path, embedded in yt_scribe.EMBEDDED_SKILL_ASSETS.items():
+            with self.subTest(relative_path=relative_path):
+                actual = Path(relative_path).read_text(encoding="utf-8")
+                self.assertEqual(actual, embedded)
+
     def test_extract_video_id_from_common_urls(self):
         self.assertEqual(yt_scribe.extract_video_id("dQw4w9WgXcQ"), "dQw4w9WgXcQ")
         self.assertEqual(
@@ -888,6 +894,61 @@ class YtScribeTests(unittest.TestCase):
             self.assertEqual(metadata["video_id"], "dQw4w9WgXcQ")
             self.assertEqual(metadata["instruction_sources"], ["--style"])
 
+    def test_run_bundle_metadata_includes_front_matter_and_record_slots(self):
+        transcript = {
+            "video_id": "dQw4w9WgXcQ",
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "language": "en",
+            "requested_languages": ["en"],
+            "track": {"language_code": "en", "name": "English", "auto_generated": False},
+            "segments": [{"start": 1.0, "duration": 0.5, "text": "hello world"}],
+            "text": "hello world",
+            "source": "youtube_transcript_api",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "run",
+                    "dQw4w9WgXcQ",
+                    "--bundle-dir",
+                    str(bundle_dir),
+                    "--front-matter",
+                ],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(
+                    yt_scribe,
+                    "run_agent_polish",
+                    side_effect=lambda **kwargs: {
+                        "output_path": yt_scribe.write_text(kwargs["out_path"], "polished\n"),
+                        "chars": len("polished\n"),
+                        "harness": "codex",
+                        "text": "polished\n",
+                    },
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = yt_scribe.handle_args(args)
+
+            payload = json.loads(stdout.getvalue())
+            metadata = json.loads((bundle_dir / "metadata.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["run"]["front_matter"])
+        self.assertEqual(metadata["front_matter_data"]["video_id"], "dQw4w9WgXcQ")
+        self.assertEqual(metadata["front_matter_data"]["caption_name"], "English")
+        self.assertEqual(metadata["records"], {"manifest": None, "verification": None})
+        self.assertEqual(
+            payload["run"]["bundle"]["records"],
+            {"manifest": None, "verification": None},
+        )
+
     def test_run_json_reports_requested_language_fallbacks(self):
         transcript = {
             "video_id": "dQw4w9WgXcQ",
@@ -990,6 +1051,83 @@ class YtScribeTests(unittest.TestCase):
         self.assertTrue(payload["run"]["timestamp_grounding"])
         self.assertIn("--template", payload["run"]["instruction_sources"])
         self.assertIn("[00:01] hello world", polish.call_args.kwargs["transcript_text"])
+
+    def test_run_profile_reads_project_config_and_allows_boolean_overrides(self):
+        transcript = {
+            "video_id": "dQw4w9WgXcQ",
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "language": "sv",
+            "requested_languages": ["sv"],
+            "track": {"language_code": "sv"},
+            "segments": [{"start": 1.0, "duration": 0.5, "text": "hello world"}],
+            "text": "hello world",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            project_config_dir = root / ".yt-scribe"
+            project_config_dir.mkdir()
+            (project_config_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "profiles": {
+                            "research": {
+                                "style": "summary",
+                                "langs": ["sv"],
+                                "timestamps": True,
+                                "front_matter": True,
+                                "chunk_chars": 25,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            previous_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                args = yt_scribe.build_parser().parse_args(
+                    [
+                        "--json",
+                        "run",
+                        "dQw4w9WgXcQ",
+                        "--profile",
+                        "research",
+                        "--no-timestamps",
+                        "--no-front-matter",
+                        "--chunk-chars",
+                        "0",
+                        "--stdout",
+                    ],
+                )
+                stdout = io.StringIO()
+
+                with (
+                    patch.object(yt_scribe, "fetch_transcript", return_value=transcript) as fetch,
+                    patch.object(
+                        yt_scribe,
+                        "run_agent_polish",
+                        return_value={
+                            "output_path": None,
+                            "chars": len("polished text\n"),
+                            "harness": "codex",
+                            "text": "polished text\n",
+                        },
+                    ) as polish,
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    exit_code = yt_scribe.handle_args(args)
+            finally:
+                os.chdir(previous_cwd)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fetch.call_args.args[1], ["sv"])
+        self.assertEqual(payload["run"]["style"], "summary")
+        self.assertFalse(payload["run"]["timestamp_grounding"])
+        self.assertFalse(payload["run"]["front_matter"])
+        self.assertFalse(payload["run"]["chunking"]["enabled"])
+        self.assertNotIn("[00:01]", polish.call_args.kwargs["transcript_text"])
 
     def test_inspect_brief_reports_small_caption_summary(self):
         args = yt_scribe.build_parser().parse_args(["--json", "inspect", "dQw4w9WgXcQ", "--brief"])
@@ -1395,6 +1533,47 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(manifest["items"][0]["playlist_url"], playlist_url)
         self.assertEqual(manifest["items"][0]["playlist_id"], "PLabc123")
+
+    def test_batch_playlist_expansion_failure_is_recorded_in_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            list_path = root / "videos.txt"
+            out_dir = root / "notes"
+            manifest_path = root / "manifest.json"
+            playlist_url = "https://www.youtube.com/playlist?list=PLabc123"
+            list_path.write_text(f"{playlist_url}\n", encoding="utf-8")
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "batch",
+                    str(list_path),
+                    "--out-dir",
+                    str(out_dir),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.object(
+                    yt_scribe,
+                    "fetch_playlist_video_ids",
+                    side_effect=yt_scribe.CliError("No videos were found", "playlist_empty"),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = yt_scribe.handle_args(args)
+
+            payload = json.loads(stdout.getvalue())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(manifest["failed"], 1)
+        self.assertEqual(manifest["items"][0]["url"], playlist_url)
+        self.assertEqual(manifest["items"][0]["playlist_id"], "PLabc123")
+        self.assertEqual(manifest["items"][0]["error"]["code"], "playlist_empty")
 
     def test_batch_resume_skips_existing_outputs(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

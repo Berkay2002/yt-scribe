@@ -253,7 +253,9 @@ yt-scribe config profile remove research
 Without config, `yt-scribe` uses Codex. A config default changes future `polish` and `run` commands unless a command passes `--agent-harness` explicitly.
 Named profiles can also provide defaults for repeated workflows. `run`, `polish`,
 and `batch` accept `--profile <name>`, and command-line flags override profile
-values where the CLI can distinguish them.
+values, including `--no-timestamps`, `--no-front-matter`, and
+`--chunk-chars 0`. When a project has `.yt-scribe/config.json`, that config is
+read as a local overlay unless `YT_SCRIBE_CONFIG` points somewhere explicit.
 
 `install-skills`
 
@@ -355,6 +357,9 @@ Keep a run's artifacts together:
 ```sh
 yt-scribe run "<youtube-url>" --bundle-dir .yt-scribe/runs/VIDEO_ID
 ```
+
+The bundle metadata records the transcript, polished output, chunking, front
+matter data when enabled, and manifest or verification record slots when present.
 
 </details>
 

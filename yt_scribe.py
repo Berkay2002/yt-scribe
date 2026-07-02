@@ -35,6 +35,7 @@ AGENTS_SKILLS_DIR_ENV_VAR = "YT_SCRIBE_AGENTS_SKILLS_DIR"
 HTTP_PROXY_ENV_VAR = "YT_SCRIBE_HTTP_PROXY"
 HTTPS_PROXY_ENV_VAR = "YT_SCRIBE_HTTPS_PROXY"
 DEFAULT_CACHE_DIR = Path(".yt-scribe") / "cache"
+PROJECT_CONFIG = Path(".yt-scribe") / CONFIG_FILENAME
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -213,7 +214,7 @@ Codex polishing harness.
 
 ```sh
 yt-scribe --json run "<youtube-url>"
-yt-scribe --json polish transcript.txt --style notes --out notes.md
+yt-scribe --json polish transcript.txt --style summary --out summary.md
 ```
 
 With Codex, the CLI invokes `codex exec` in read-only, ephemeral mode and passes
@@ -252,7 +253,10 @@ instructions. Prefer `--out` when the user expects a file.
 """,
     ".agents/skills/yt-scribe-transcript-polisher/SKILL.md": """---
 name: yt-scribe-transcript-polisher
-description: Polish transcript text passed by yt-scribe. Do not fetch captions.
+description: Use when `yt-scribe polish` or `yt-scribe run` invokes an agent to
+  transform a YouTube transcript into cleaned text, notes, a summary, or
+  article-style prose. This skill is for transcript polishing only, not for
+  fetching captions or running the CLI.
 ---
 
 # yt-scribe Transcript Polisher
@@ -278,8 +282,10 @@ Read exactly one harness file based on how the transcript was provided:
 - When timestamp grounding is requested, preserve useful timestamp anchors from
   the provided transcript near important claims. Do not invent timestamps.
 - Do not add facts, examples, citations, links, or claims that are not in the transcript.
-- Do not mention that you used a skill, a harness, stdin, an attached file, or a cleaning process.
-- If the transcript is empty or unusable, say that the transcript content is missing or unusable.
+- Do not mention that you used a skill, a harness, stdin, an attached file, or a
+  cleaning process.
+- If the transcript is empty or unusable, say that the transcript content is
+  missing or unusable.
 
 ## Output Modes
 
@@ -1390,28 +1396,35 @@ def render_front_matter(data: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def run_front_matter_data(
+    transcript: dict[str, Any],
+    style: str,
+    instruction: PolishInstruction,
+    harness: str,
+) -> dict[str, Any]:
+    track = transcript.get("track") or {}
+    return {
+        "video_id": transcript.get("video_id"),
+        "url": transcript.get("url"),
+        "language": transcript.get("language"),
+        "caption_name": track.get("name"),
+        "caption_auto_generated": track.get("auto_generated"),
+        "segments": len(transcript.get("segments") or []),
+        "transcript_chars": len(transcript.get("text") or ""),
+        "style": style,
+        "instruction_mode": instruction.mode,
+        "instruction_sources": instruction.sources,
+        "agent_harness": harness,
+    }
+
+
 def run_front_matter(
     transcript: dict[str, Any],
     style: str,
     instruction: PolishInstruction,
     harness: str,
 ) -> str:
-    track = transcript.get("track") or {}
-    return render_front_matter(
-        {
-            "video_id": transcript.get("video_id"),
-            "url": transcript.get("url"),
-            "language": transcript.get("language"),
-            "caption_name": track.get("name"),
-            "caption_auto_generated": track.get("auto_generated"),
-            "segments": len(transcript.get("segments") or []),
-            "transcript_chars": len(transcript.get("text") or ""),
-            "style": style,
-            "instruction_mode": instruction.mode,
-            "instruction_sources": instruction.sources,
-            "agent_harness": harness,
-        }
-    )
+    return render_front_matter(run_front_matter_data(transcript, style, instruction, harness))
 
 
 def apply_output_prefix(result: dict[str, Any], prefix: str) -> dict[str, Any]:
@@ -1500,7 +1513,23 @@ def expand_batch_items(
         if not playlist_id:
             items.append({"url": url})
             continue
-        for video_id in fetch_playlist_video_ids(url, proxy_config):
+        try:
+            video_ids = fetch_playlist_video_ids(url, proxy_config)
+        except CliError as exc:
+            items.append(
+                {
+                    "url": url,
+                    "playlist_url": url,
+                    "playlist_id": playlist_id,
+                    "playlist_error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        **exc.details,
+                    },
+                }
+            )
+            continue
+        for video_id in video_ids:
             items.append(
                 {
                     "url": canonical_watch_url(video_id),
@@ -1652,8 +1681,20 @@ def config_path() -> Path:
     return Path.home() / ".config" / COMMAND_NAME / CONFIG_FILENAME
 
 
-def read_config() -> dict[str, Any]:
-    path = config_path()
+def project_config_path(start: str | Path | None = None) -> Path | None:
+    if os.environ.get(CONFIG_ENV_VAR):
+        return None
+    current = Path.cwd() if start is None else Path(start).expanduser().resolve()
+    if current.is_file():
+        current = current.parent
+    for directory in (current, *current.parents):
+        candidate = directory / PROJECT_CONFIG
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def read_config_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
@@ -1674,6 +1715,27 @@ def read_config() -> dict[str, Any]:
     return loaded
 
 
+def merge_configs(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = {**base, **overlay}
+    profiles = {
+        **(base.get("profiles") or {}),
+        **(overlay.get("profiles") or {}),
+    }
+    if profiles:
+        merged["profiles"] = profiles
+    elif "profiles" in merged:
+        merged.pop("profiles")
+    return merged
+
+
+def read_config() -> dict[str, Any]:
+    config = read_config_file(config_path())
+    local_path = project_config_path()
+    if local_path:
+        config = merge_configs(config, read_config_file(local_path))
+    return config
+
+
 def write_config(config: dict[str, Any]) -> Path:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1688,8 +1750,11 @@ def effective_agent_harness(config: dict[str, Any] | None = None) -> str:
 
 def config_payload(config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = read_config() if config is None else config
+    local_path = project_config_path()
     return {
-        "path": str(config_path()),
+        "path": str(local_path or config_path()),
+        "global_path": str(config_path()),
+        "project_path": str(local_path) if local_path else None,
         "default_agent_harness": config.get("default_agent_harness"),
         "effective_agent_harness": effective_agent_harness(config),
         "profiles": config.get("profiles") or {},
@@ -1702,7 +1767,18 @@ def normalize_profile_languages(value: str | list[str] | tuple[str, ...]) -> lis
 
 def profile_from_args(args: argparse.Namespace) -> dict[str, Any]:
     profile: dict[str, Any] = {}
-    for key in ("style", "template", "agent_harness"):
+    for key in (
+        "style",
+        "template",
+        "agent_harness",
+        "cache_dir",
+        "transcript",
+        "transcript_format",
+        "out",
+        "bundle_dir",
+        "out_dir",
+        "manifest",
+    ):
         value = getattr(args, key, None)
         if value:
             profile[key] = value
@@ -1710,10 +1786,10 @@ def profile_from_args(args: argparse.Namespace) -> dict[str, Any]:
         profile["langs"] = normalize_profile_languages(args.langs)
     if getattr(args, "focus", None):
         profile["focus"] = args.focus
-    if getattr(args, "front_matter", False):
-        profile["front_matter"] = True
-    if getattr(args, "timestamps", False):
-        profile["timestamps"] = True
+    for key in ("front_matter", "timestamps", "resume", "stdout"):
+        value = getattr(args, key, None)
+        if value is not None:
+            profile[key] = bool(value)
     if getattr(args, "chunk_chars", None) is not None:
         profile["chunk_chars"] = args.chunk_chars
     return profile
@@ -1738,18 +1814,30 @@ def apply_profile(args: argparse.Namespace) -> None:
         args.focus = list(profile["focus"])
     if hasattr(args, "langs") and getattr(args, "langs", None) is None and profile.get("langs"):
         args.langs = ",".join(profile["langs"])
+    for key in (
+        "cache_dir",
+        "transcript",
+        "transcript_format",
+        "out",
+        "bundle_dir",
+        "out_dir",
+        "manifest",
+    ):
+        if hasattr(args, key) and getattr(args, key, None) is None and profile.get(key):
+            setattr(args, key, profile[key])
     if (
         hasattr(args, "agent_harness")
         and getattr(args, "agent_harness", None) is None
         and profile.get("agent_harness")
     ):
         args.agent_harness = profile["agent_harness"]
-    if hasattr(args, "front_matter") and not args.front_matter and profile.get("front_matter"):
-        args.front_matter = True
-    if hasattr(args, "timestamps") and not args.timestamps and profile.get("timestamps"):
-        args.timestamps = True
-    if hasattr(args, "chunk_chars") and not args.chunk_chars and profile.get("chunk_chars"):
-        args.chunk_chars = int(profile["chunk_chars"])
+    for key in ("front_matter", "timestamps", "resume", "stdout"):
+        if hasattr(args, key) and getattr(args, key, None) is None:
+            setattr(args, key, bool(profile.get(key, False)))
+    if hasattr(args, "chunk_chars") and getattr(args, "chunk_chars", None) is None:
+        args.chunk_chars = int(profile.get("chunk_chars", 0) or 0)
+    if hasattr(args, "transcript_format") and getattr(args, "transcript_format", None) is None:
+        args.transcript_format = "text"
 
 
 def agent_harness_status() -> dict[str, Any]:
@@ -2220,34 +2308,39 @@ def handle_args(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "config":
-        config = read_config()
+        config = read_config_file(config_path())
+        effective_config = read_config()
         if args.config_command == "set":
             config["default_agent_harness"] = args.value
             write_config(config)
+            effective_config = read_config()
         elif args.config_command == "unset":
             config.pop("default_agent_harness", None)
             write_config(config)
+            effective_config = read_config()
         elif args.config_command == "profile":
             profiles = config.setdefault("profiles", {})
             if args.profile_command == "set":
                 profiles[args.name] = profile_from_args(args)
                 write_config(config)
+                effective_config = read_config()
             elif args.profile_command == "remove":
                 profiles.pop(args.name, None)
                 write_config(config)
+                effective_config = read_config()
             elif args.profile_command == "get":
-                profile = get_profile(config, args.name)
+                profile = get_profile(effective_config, args.name)
                 payload = {
                     "ok": True,
                     "profile": {"name": args.name, "values": profile},
-                    "config": config_payload(config),
+                    "config": config_payload(effective_config),
                 }
                 emit(payload, args.json)
                 return 0
 
-        payload = {"ok": True, "config": config_payload(config)}
+        payload = {"ok": True, "config": config_payload(effective_config)}
         text = (
-            f"config: {config_path()}\n"
+            f"config: {payload['config']['path']}\n"
             f"default_agent_harness: {payload['config']['default_agent_harness']}\n"
             f"effective_agent_harness: {payload['config']['effective_agent_harness']}\n"
         )
@@ -2463,10 +2556,17 @@ def handle_args(args: argparse.Namespace) -> int:
                 progress=progress,
             )
             result["chunking"] = chunking_disabled_payload()
+        front_matter_data = None
         if args.front_matter:
+            front_matter_data = run_front_matter_data(
+                transcript,
+                args.style,
+                instruction,
+                result["harness"],
+            )
             result = apply_output_prefix(
                 result,
-                run_front_matter(transcript, args.style, instruction, result["harness"]),
+                render_front_matter(front_matter_data),
             )
         payload = {
             "ok": True,
@@ -2488,6 +2588,7 @@ def handle_args(args: argparse.Namespace) -> int:
                 "output_path": result["output_path"],
                 "chars": result["chars"],
                 "front_matter": args.front_matter,
+                "front_matter_data": front_matter_data,
                 "chunking": result["chunking"],
                 "cache": cache,
                 "bundle": None,
@@ -2512,8 +2613,14 @@ def handle_args(args: argparse.Namespace) -> int:
                     "agent_harness": result["harness"],
                     "transcript_path": transcript_path,
                     "output_path": result["output_path"],
+                    "front_matter_enabled": args.front_matter,
+                    "front_matter_data": front_matter_data,
                     "chunking": result["chunking"],
                     "cache": cache,
+                    "records": {
+                        "manifest": None,
+                        "verification": None,
+                    },
                 },
             )
             payload["run"]["bundle"] = {
@@ -2521,6 +2628,10 @@ def handle_args(args: argparse.Namespace) -> int:
                 "transcript": transcript_path,
                 "polished": result["output_path"],
                 "metadata": metadata_path,
+                "records": {
+                    "manifest": None,
+                    "verification": None,
+                },
             }
         if args.json:
             emit(payload, True)
@@ -2532,6 +2643,10 @@ def handle_args(args: argparse.Namespace) -> int:
 
     if args.command == "batch":
         progress = ProgressReporter(not args.json)
+        if not args.out_dir:
+            raise CliError("batch requires --out-dir or a profile out_dir", "missing_out_dir")
+        if not args.manifest:
+            raise CliError("batch requires --manifest or a profile manifest", "missing_manifest")
         urls = read_batch_urls(args.file)
         out_dir = Path(args.out_dir).expanduser().resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -2554,6 +2669,17 @@ def handle_args(args: argparse.Namespace) -> int:
             }
             progress.message(f"Batch item {index}/{len(batch_inputs)}: {url}")
             try:
+                playlist_error = batch_input.get("playlist_error")
+                if playlist_error:
+                    raise CliError(
+                        playlist_error.get("message") or "Playlist expansion failed",
+                        playlist_error.get("code") or "playlist_error",
+                        {
+                            key: value
+                            for key, value in playlist_error.items()
+                            if key not in {"code", "message"}
+                        },
+                    )
                 video_id = extract_video_id(url)
                 output_path = batch_output_path(out_dir, video_id, args.style)
                 if args.resume and output_path.is_file():
@@ -2726,7 +2852,8 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--out", help="write polished output to this file")
     parser.add_argument(
         "--stdout",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="print polished output instead of writing a file",
     )
     parser.add_argument(
@@ -2752,7 +2879,8 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--timestamps",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="ask the polisher to preserve useful timestamp anchors",
     )
     parser.add_argument(
@@ -2837,8 +2965,39 @@ ai contract:
     profile_set_parser.add_argument("--langs", help="ordered comma-separated caption languages")
     profile_set_parser.add_argument("--focus", action="append", help="profile focus instruction")
     profile_set_parser.add_argument("--template", choices=sorted(TEMPLATE_INSTRUCTIONS))
-    profile_set_parser.add_argument("--front-matter", action="store_true")
-    profile_set_parser.add_argument("--timestamps", action="store_true")
+    profile_set_parser.add_argument(
+        "--front-matter",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    profile_set_parser.add_argument(
+        "--timestamps",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    profile_set_parser.add_argument("--cache-dir", help="advanced: transcript cache directory")
+    profile_set_parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="advanced: reuse cached or existing outputs where supported",
+    )
+    profile_set_parser.add_argument("--transcript", help="run: also write transcript here")
+    profile_set_parser.add_argument(
+        "--transcript-format",
+        choices=["text", "json", "srt"],
+        help="run: raw transcript format",
+    )
+    profile_set_parser.add_argument("--out", help="polish/run: write polished output here")
+    profile_set_parser.add_argument(
+        "--stdout",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="polish/run: print polished output instead of writing a file",
+    )
+    profile_set_parser.add_argument("--bundle-dir", help="run: bundle output directory")
+    profile_set_parser.add_argument("--out-dir", help="batch: directory for polished outputs")
+    profile_set_parser.add_argument("--manifest", help="batch: manifest JSON path")
     profile_set_parser.add_argument("--chunk-chars", type=int)
     profile_set_parser.add_argument("--agent-harness", choices=AGENT_HARNESSES)
     profile_get_parser = profile_subparsers.add_parser("get", help="show a profile")
@@ -2923,24 +3082,26 @@ ai contract:
     run_parser.add_argument("--cache-dir", help="advanced: transcript cache directory")
     run_parser.add_argument(
         "--resume",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="advanced: reuse a cached transcript when available",
     )
     run_parser.add_argument("--transcript", help="also write the raw transcript to this file")
-    run_parser.add_argument("--transcript-format", choices=["text", "json", "srt"], default="text")
+    run_parser.add_argument("--transcript-format", choices=["text", "json", "srt"], default=None)
     run_parser.add_argument(
         "--bundle-dir",
         help="advanced: write transcript, polished output, and metadata under this directory",
     )
     run_parser.add_argument(
         "--front-matter",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="prepend factual YAML front matter to polished markdown output",
     )
     run_parser.add_argument(
         "--chunk-chars",
         type=int,
-        default=0,
+        default=None,
         help="advanced: polish transcript chunks of roughly this many characters",
     )
     add_proxy_flags(run_parser)
@@ -2951,8 +3112,8 @@ ai contract:
         help="advanced: process a plain text list of YouTube URLs",
     )
     batch_parser.add_argument("file", help="plain text file with one YouTube URL or ID per line")
-    batch_parser.add_argument("--out-dir", required=True, help="directory for polished outputs")
-    batch_parser.add_argument("--manifest", required=True, help="write batch manifest JSON here")
+    batch_parser.add_argument("--out-dir", help="directory for polished outputs")
+    batch_parser.add_argument("--manifest", help="write batch manifest JSON here")
     batch_parser.add_argument("--lang", default="en", help="caption language code, default: en")
     batch_parser.add_argument(
         "--langs",
@@ -2961,18 +3122,20 @@ ai contract:
     batch_parser.add_argument("--cache-dir", help="advanced: transcript cache directory")
     batch_parser.add_argument(
         "--resume",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="advanced: skip existing outputs and reuse cached transcripts",
     )
     batch_parser.add_argument(
         "--front-matter",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="prepend factual YAML front matter to polished markdown output",
     )
     batch_parser.add_argument(
         "--chunk-chars",
         type=int,
-        default=0,
+        default=None,
         help="advanced: polish transcript chunks of roughly this many characters",
     )
     add_proxy_flags(batch_parser)
