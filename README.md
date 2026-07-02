@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" width="140" alt="yt-scribe logo">
+  <img src="assets/logo.svg" width="128" alt="yt-scribe logo">
 </p>
 
 # yt-scribe
