@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a small Python CLI package. Package code lives under `src/yt_scribe/`. The `yt-scribe` console script routes through `src/yt_scribe/cli.py`, and the MCP server routes through `src/yt_scribe/mcp.py`. Root `yt_scribe.py` and `yt_scribe_mcp.py` remain thin compatibility wrappers for direct script use and legacy imports. Tests live in `tests/`, with CLI behavior in `tests/test_cli.py`, MCP behavior in `tests/test_mcp.py`, focused module coverage in files such as `tests/test_youtube.py`, and opt-in live integration coverage in `tests/test_e2e.py`.
+This is a small Python CLI package. Package code lives under `src/yt_scribe/`. The package root is an intentional interface: keep `yt_scribe.VERSION`, shared public errors/models, progress helpers, and workflow module namespaces available, but do not add broad helper exports back to `src/yt_scribe/__init__.py`. The `yt-scribe` console script routes through `src/yt_scribe/cli.py`, and the MCP server routes through `src/yt_scribe/mcp.py`. Root `yt_scribe.py` and `yt_scribe_mcp.py` remain thin compatibility wrappers for direct script use and legacy imports. Tests live in `tests/`, with CLI behavior in `tests/test_cli.py`, MCP behavior in `tests/test_mcp.py`, package-interface coverage in `tests/test_package_interface.py`, focused module coverage in files such as `tests/test_youtube.py`, and opt-in live integration coverage in `tests/test_e2e.py`.
 
 Packaged support files are split by purpose: `skills/` contains the Codex plugin skills, `.agents/skills/` contains the shared setup-source copies used by the CLI install flow, `assets/` contains logo files, and `.codex-plugin/` holds plugin metadata. Install helpers are `install-local.sh` and `install-local.ps1`.
 
@@ -21,7 +21,7 @@ Target Python 3.10+. Ruff is configured with a 100-character line length and rul
 
 ## Testing Guidelines
 
-Add or update tests for every behavior change. Prefer narrow unit tests in `tests/test_yt_scribe.py` for parser, formatting, config, and helper logic. Use `tests/test_cli.py` when stdout, stderr, exit codes, or JSON stability matters. Keep network and live agent checks behind the `e2e` marker and `YT_SCRIBE_RUN_E2E=1`.
+Add or update tests for every behavior change. Prefer focused module tests such as `tests/test_youtube.py`, `tests/test_transcripts.py`, `tests/test_config.py`, and `tests/test_runs.py` for workflow behavior. Use `tests/test_cli.py` when stdout, stderr, exit codes, or JSON stability matters, and `tests/test_package_interface.py` for intentional package-root exports. Keep network and live agent checks behind the `e2e` marker and `YT_SCRIBE_RUN_E2E=1`.
 
 ## Commit & Pull Request Guidelines
 
@@ -52,9 +52,11 @@ The plugin exposes one skill:
 The transcript-polisher skill is internal CLI support under `.agents/skills/`;
 do not copy it into the plugin `skills/` tree.
 
-Keep embedded skill assets in `src/yt_scribe/__init__.py` in sync with the files
-under `skills/` and `.agents/skills/` when changing setup, plugin, or install
-behavior.
+Keep embedded skill assets exposed as `yt_scribe.EMBEDDED_SKILL_ASSETS` in sync
+with the files under `skills/` and `.agents/skills/` when changing setup,
+plugin, or install behavior. The current embedded source lives in
+`src/yt_scribe/_legacy.py`; do not import `_legacy` from new code except while
+unwinding the remaining transitional polish internals.
 
 ## Advanced Workflow Features
 
