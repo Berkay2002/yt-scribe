@@ -48,11 +48,19 @@ Then use it:
 yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
-Or let an agent install it for you. Open Codex or OpenCode and paste this:
+<details>
+<summary>Agent-assisted install prompt</summary>
+
+Open Codex or OpenCode and paste this:
 
 ```text
 Install yt-scribe on this machine: run python -m pip install --upgrade git+https://github.com/Berkay2002/yt-scribe.git && python -m yt_scribe setup, then run python -m yt_scribe --json doctor and tell me whether the yt-scribe command is on PATH and which agent harnesses are available. If yt-scribe is not on PATH, tell me the python -m yt_scribe fallback command to use. Then ask whether I want to add yt-scribe guidance to the current project's AGENTS.md so teammates and future agents use it consistently. If I say yes, add a yt-scribe section that says to use yt-scribe for YouTube transcript workflows, prefer yt-scribe run "<youtube-url>" for one-command transcript-to-notes work, use yt-scribe --json inspect "<youtube-url>" before assuming captions exist, do not bypass private or disabled captions, and do not add facts that are not in the transcript.
 ```
+
+</details>
+
+<details>
+<summary>Local development, MCP extra, and test commands</summary>
 
 For local development or immediate use from a checkout, run the local installer. It installs the package in editable mode, creates the wrapper, and runs `yt-scribe setup` for you.
 
@@ -122,6 +130,8 @@ $env:YT_SCRIBE_RUN_E2E = "1"; python -m pytest tests/test_e2e.py -q -s
 ```
 
 The e2e test fetches a real transcript and runs both Codex and OpenCode when they are installed. It is opt-in because it uses network access and live agent calls.
+
+</details>
 
 ## Quick Start
 
@@ -218,6 +228,13 @@ yt-scribe fetch "<url>" --format json --out transcript.json
 Uses the configured agent harness to polish an existing transcript. The built-in default is Codex.
 
 ```sh
+yt-scribe polish transcript.txt --style summary --out summary.md
+```
+
+<details>
+<summary>Polish option examples</summary>
+
+```sh
 yt-scribe polish transcript.txt --style clean --out clean.txt
 yt-scribe polish transcript.txt --style notes --out notes.md
 yt-scribe polish transcript.txt --style summary --out summary.md
@@ -234,6 +251,8 @@ normal transcript-polisher prompt. Custom focus instructions override `--style`
 where they conflict, but they do not allow the agent to add facts that are not in
 the transcript. `--instruction` and `--prompt-file` are advanced options that
 replace the whole polishing prompt.
+
+</details>
 
 `run <url>`
 
@@ -257,6 +276,9 @@ stdout machine-readable.
 
 Shows or edits the persisted yt-scribe config.
 
+<details>
+<summary>Config and profile commands</summary>
+
 ```sh
 yt-scribe config
 yt-scribe config set default-agent-harness opencode
@@ -272,6 +294,11 @@ and `batch` accept `--profile <name>`, and command-line flags override profile
 values, including `--no-timestamps`, `--no-front-matter`, and
 `--chunk-chars 0`. When a project has `.yt-scribe/config.json`, that config is
 read as a local overlay unless `YT_SCRIBE_CONFIG` points somewhere explicit.
+
+</details>
+
+<details>
+<summary>Additional commands</summary>
 
 `install-skills`
 
@@ -310,6 +337,8 @@ Read-only diagnostic escape hatch for inspecting the selected YouTube timedtext 
 ```sh
 yt-scribe raw "<url>" --lang en
 ```
+
+</details>
 
 ## Advanced Usage
 
@@ -624,6 +653,9 @@ For HTTP mode, start the server first and point the inspector at
 
 Codex is the built-in default. `polish` and `run` call:
 
+<details>
+<summary>Harness command details and skill layout</summary>
+
 ```text
 codex exec --ephemeral --skip-git-repo-check --sandbox read-only --output-last-message <temp-file> "<instruction>"
 ```
@@ -652,6 +684,8 @@ The Codex plugin uses the root `skills/` tree. The CLI setup flow also keeps a
 shared `.agents/skills` tree for installing these skills globally from the
 command line. Each skill keeps Codex and OpenCode notes in separate files, so
 each tool sees only the details it needs.
+
+</details>
 
 ## Plugin Skills
 
