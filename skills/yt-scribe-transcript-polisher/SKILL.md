@@ -1,11 +1,11 @@
 ---
 name: yt-scribe-transcript-polisher
-description: Use when Codex is invoked by `yt-scribe polish` or `yt-scribe run` through `codex exec` to transform a YouTube transcript provided on stdin into cleaned text, notes, a summary, or article-style prose. This skill is for the inner Codex agent doing the transcript polishing, not for fetching captions or running the CLI.
+description: Use when an agent is invoked by `yt-scribe polish` or `yt-scribe run` to transform a YouTube transcript provided on stdin or as an attached file into cleaned text, notes, a summary, or article-style prose. This skill is for the inner agent doing the transcript polishing, not for fetching captions or running the CLI.
 ---
 
 # yt-scribe Transcript Polisher
 
-Transform the transcript text already provided in the prompt/stdin. Do not fetch the video, inspect files, run shell commands, or call `yt-scribe`; that work belongs to the outer CLI workflow.
+Transform the transcript text already provided in the prompt, stdin, or attached transcript file. Do not fetch the video, inspect unrelated files, run shell commands, or call `yt-scribe`; that work belongs to the outer CLI workflow.
 
 ## Rules
 
@@ -13,7 +13,7 @@ Transform the transcript text already provided in the prompt/stdin. Do not fetch
 - Preserve the speaker's meaning, sequence, and concrete claims.
 - Remove caption artifacts, repeated fragments, filler, obvious false starts, and timestamp residue.
 - Do not add facts, examples, citations, links, or claims that are not in the transcript.
-- Do not mention that you used a skill, stdin, Codex, or a cleaning process.
+- Do not mention that you used a skill, stdin, an attached file, Codex, OpenCode, or a cleaning process.
 - If the transcript is empty or unusable, say that the transcript content is missing or unusable.
 
 ## Output Modes

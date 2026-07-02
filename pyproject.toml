@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "yt-scribe"
 version = "0.1.0"
-description = "Fetch YouTube transcripts and polish them with codex exec."
+description = "Fetch YouTube transcripts and polish them with Codex or OpenCode."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,7 +13,7 @@ dependencies = [
 ]
 license = { text = "MIT" }
 authors = [{ name = "Berkay" }]
-keywords = ["youtube", "transcript", "codex", "cli", "notes"]
+keywords = ["youtube", "transcript", "codex", "opencode", "cli", "notes"]
 classifiers = [
   "Environment :: Console",
   "License :: OSI Approved :: MIT License",
@@ -38,6 +38,9 @@ py-modules = ["yt_scribe"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "e2e: real YouTube and agent harness integration tests",
+]
 
 [tool.ruff]
 line-length = 100

@@ -4,16 +4,16 @@
 
 # yt-scribe
 
-Turn a YouTube link into a transcript, then ask Codex to polish it into readable notes, summaries, cleaned text, or article-style prose.
+Turn a YouTube link into a transcript, then ask an agent harness to polish it into readable notes, summaries, cleaned text, or article-style prose.
 
-`yt-scribe` is human-first software that can also be driven by Codex agents:
+`yt-scribe` is human-first software that can also be driven by coding agents:
 
 - You can run one obvious command and get a useful notes file.
-- Codex can use the same CLI with stable JSON, explicit lifecycle steps, and composable commands.
+- Agents can use the same CLI with stable JSON, explicit lifecycle steps, and composable commands.
 
 Use it yourself from the terminal, or let Codex use it as an agent tool.
 
-It uses public YouTube caption tracks when they are available through `youtube-transcript-api`. It does not download video or audio. Polishing is done locally through `codex exec`, so it reuses your existing Codex CLI authentication.
+It uses public YouTube caption tracks when they are available through `youtube-transcript-api`. It does not download video or audio. Polishing is done locally through Codex by default, and can use OpenCode when selected.
 
 ## Install
 
@@ -40,6 +40,22 @@ yt-scribe doctor
 ```powershell
 pip install -e .[dev]
 ```
+
+Run normal tests:
+
+```powershell
+python -m pytest
+python -m ruff check .
+```
+
+Run the real YouTube and agent harness e2e test:
+
+```powershell
+$env:YT_SCRIBE_RUN_E2E = "1"
+python -m pytest tests/test_e2e.py -q -s
+```
+
+The e2e test fetches a real transcript and runs both Codex and OpenCode when they are installed. It is opt-in because it uses network access and live agent calls.
 
 ## Quick Start
 
@@ -91,7 +107,7 @@ yt-scribe lifecycle
 
 `doctor`
 
-Checks Python, Codex CLI, PATH installation, and the expected lifecycle.
+Checks Python, agent harness availability, PATH installation, config, and the expected lifecycle.
 
 `inspect <url>`
 
@@ -111,13 +127,14 @@ yt-scribe fetch "<url>" --format json --out transcript.json
 
 `polish <file>`
 
-Uses `codex exec` to polish an existing transcript.
+Uses the configured agent harness to polish an existing transcript. The built-in default is Codex.
 
 ```powershell
 yt-scribe polish transcript.txt --style clean --out clean.txt
 yt-scribe polish transcript.txt --style notes --out notes.md
 yt-scribe polish transcript.txt --style summary --out summary.md
 yt-scribe polish transcript.txt --style article --out article.md
+yt-scribe polish transcript.txt --agent-harness opencode --out notes.md
 ```
 
 `run <url>`
@@ -129,7 +146,20 @@ yt-scribe run "<url>"
 yt-scribe run "<url>" --style summary
 yt-scribe run "<url>" --stdout
 yt-scribe run "<url>" --transcript transcript.txt --out notes.md
+yt-scribe run "<url>" --agent-harness opencode
 ```
+
+`config`
+
+Shows or edits the persisted yt-scribe config.
+
+```powershell
+yt-scribe config
+yt-scribe config set default-agent-harness opencode
+yt-scribe config unset default-agent-harness
+```
+
+Without config, `yt-scribe` uses Codex. A config default changes future `polish` and `run` commands unless a command passes `--agent-harness` explicitly.
 
 `raw <url>`
 
@@ -174,15 +204,23 @@ Errors return:
 }
 ```
 
-## How Codex Is Used
+## Agent Harnesses
 
-`polish` and `run` call:
+Codex is the built-in default. `polish` and `run` call:
 
 ```text
 codex exec --ephemeral --skip-git-repo-check --sandbox read-only --output-last-message <temp-file> "<instruction>"
 ```
 
 The transcript is passed through stdin. Codex progress stays separate from the final output, and the final message is read from the file written by `--output-last-message`.
+
+OpenCode is available when `opencode` is on PATH and selected with `--agent-harness opencode` or config. `yt-scribe` calls:
+
+```text
+opencode run "<instruction>" --file <temp-transcript-file> --format json
+```
+
+The final text is read from OpenCode JSON events. Run `yt-scribe doctor` to check whether `codex` and `opencode` are available and whether their auth commands report usable local configuration.
 
 If the optional Codex plugin is installed, the inner `codex exec` agent uses a dedicated `yt-scribe-transcript-polisher` skill for the transcript rewrite. A separate `yt-scribe` skill is for outer Codex agents that want to run the CLI.
 

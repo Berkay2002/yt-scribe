@@ -24,6 +24,11 @@ from youtube_transcript_api import YouTubeTranscriptApi
 
 VERSION = "0.1.0"
 COMMAND_NAME = "yt-scribe"
+DEFAULT_AGENT_HARNESS = "codex"
+AGENT_HARNESSES = ("codex", "opencode")
+CONFIG_ENV_VAR = "YT_SCRIBE_CONFIG"
+CONFIG_FILENAME = "config.json"
+ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -37,26 +42,29 @@ STYLE_INSTRUCTIONS = {
         "timestamps, caption artifacts, and obvious speech disfluencies. "
         "Preserve the speaker's meaning and order. Do not add facts that are "
         "not in the transcript. Return only the cleaned text. The transcript "
-        "is provided on stdin."
+        "is provided by yt-scribe on stdin or as an attached file."
     ),
     "notes": (
         "Use the yt-scribe-transcript-polisher skill if it is available. "
         "Turn this YouTube transcript into clear markdown notes. Preserve the "
         "meaning and order. Use concise headings and bullets where helpful. "
         "Remove filler and caption artifacts. Do not add facts that are not in "
-        "the transcript. The transcript is provided on stdin."
+        "the transcript. The transcript is provided by yt-scribe on stdin or as "
+        "an attached file."
     ),
     "summary": (
         "Use the yt-scribe-transcript-polisher skill if it is available. "
         "Summarize this YouTube transcript in plain markdown. Include the main "
         "ideas, key details, and any concrete action items. Do not add facts "
-        "that are not in the transcript. The transcript is provided on stdin."
+        "that are not in the transcript. The transcript is provided by yt-scribe "
+        "on stdin or as an attached file."
     ),
     "article": (
         "Use the yt-scribe-transcript-polisher skill if it is available. "
         "Rewrite this YouTube transcript as a readable article in markdown. "
         "Preserve the argument and sequence, remove filler, and avoid adding "
-        "facts that are not in the transcript. The transcript is provided on stdin."
+        "facts that are not in the transcript. The transcript is provided by "
+        "yt-scribe on stdin or as an attached file."
     ),
 }
 
@@ -403,7 +411,27 @@ def command_path(name: str) -> str | None:
     return shutil.which(name)
 
 
+def command_invocation(executable: str, *args: str) -> list[str]:
+    suffix = Path(executable).suffix.lower()
+    if sys.platform == "win32" and suffix in {".bat", ".cmd"}:
+        return ["cmd", "/c", executable, *args]
+    if sys.platform == "win32" and suffix == ".ps1":
+        return [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            executable,
+            *args,
+        ]
+    return [executable, *args]
+
+
 def command_output(command: list[str]) -> str | None:
+    executable = command_path(command[0]) if len(command) > 0 else None
+    if executable:
+        command = command_invocation(executable, *command[1:])
     try:
         result = subprocess.run(
             command,
@@ -416,7 +444,84 @@ def command_output(command: list[str]) -> str | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return result.stdout.strip() or None
+    output = ANSI_PATTERN.sub("", result.stdout).strip()
+    return output or None
+
+
+def config_path() -> Path:
+    override = os.environ.get(CONFIG_ENV_VAR)
+    if override:
+        return Path(override).expanduser().resolve()
+    if sys.platform == "win32" and os.environ.get("APPDATA"):
+        return Path(os.environ["APPDATA"]) / COMMAND_NAME / CONFIG_FILENAME
+    return Path.home() / ".config" / COMMAND_NAME / CONFIG_FILENAME
+
+
+def read_config() -> dict[str, Any]:
+    path = config_path()
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CliError(f"Could not parse config file {path}: {exc}", "invalid_config") from exc
+    if not isinstance(loaded, dict):
+        raise CliError(f"Config file {path} must contain a JSON object", "invalid_config")
+    harness = loaded.get("default_agent_harness")
+    if harness is not None and harness not in AGENT_HARNESSES:
+        raise CliError(
+            f"Unsupported default_agent_harness in config: {harness}",
+            "invalid_config",
+        )
+    return loaded
+
+
+def write_config(config: dict[str, Any]) -> Path:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def effective_agent_harness(config: dict[str, Any] | None = None) -> str:
+    config = read_config() if config is None else config
+    return config.get("default_agent_harness") or DEFAULT_AGENT_HARNESS
+
+
+def config_payload(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = read_config() if config is None else config
+    return {
+        "path": str(config_path()),
+        "default_agent_harness": config.get("default_agent_harness"),
+        "effective_agent_harness": effective_agent_harness(config),
+    }
+
+
+def agent_harness_status() -> dict[str, Any]:
+    codex_path = command_path("codex")
+    opencode_path = command_path("opencode")
+    return {
+        "default": effective_agent_harness(),
+        "built_in_default": DEFAULT_AGENT_HARNESS,
+        "harnesses": {
+            "codex": {
+                "available": codex_path is not None,
+                "path": codex_path,
+                "version": command_output(["codex", "--version"]) if codex_path else None,
+                "auth_status": command_output(["codex", "login", "status"]) if codex_path else None,
+                "command": "codex exec",
+            },
+            "opencode": {
+                "available": opencode_path is not None,
+                "path": opencode_path,
+                "version": command_output(["opencode", "--version"]) if opencode_path else None,
+                "auth_status": command_output(["opencode", "auth", "list"])
+                if opencode_path
+                else None,
+                "command": "opencode run",
+            },
+        },
+    }
 
 
 def doctor_payload() -> dict[str, Any]:
@@ -426,7 +531,9 @@ def doctor_payload() -> dict[str, Any]:
         for part in os.environ.get("PATH", "").split(os.pathsep)
         if part
     ]
-    codex_path = command_path("codex")
+    harness_status = agent_harness_status()
+    codex_status = harness_status["harnesses"]["codex"]
+    opencode_status = harness_status["harnesses"]["opencode"]
     return {
         "command": COMMAND_NAME,
         "version": VERSION,
@@ -435,11 +542,20 @@ def doctor_payload() -> dict[str, Any]:
             "version": sys.version.split()[0],
         },
         "codex": {
-            "available": codex_path is not None,
-            "path": codex_path,
-            "version": command_output(["codex", "--version"]) if codex_path else None,
+            "available": codex_status["available"],
+            "path": codex_status["path"],
+            "version": codex_status["version"],
+            "auth_status": codex_status["auth_status"],
             "auth": "reuses saved Codex CLI authentication",
         },
+        "opencode": {
+            "available": opencode_status["available"],
+            "path": opencode_status["path"],
+            "version": opencode_status["version"],
+            "auth_status": opencode_status["auth_status"],
+            "auth": "uses the configured OpenCode auth providers",
+        },
+        "agent_harness": harness_status,
         "youtube": {
             "method": "youtube-transcript-api",
             "yt_dlp_required": False,
@@ -449,6 +565,7 @@ def doctor_payload() -> dict[str, Any]:
             "wrapper_dir_on_path": str(Path(install_dir).resolve()) in path_parts,
             "resolved_command": command_path(COMMAND_NAME),
         },
+        "config": config_payload(),
         "lifecycle": lifecycle_steps(),
     }
 
@@ -458,7 +575,7 @@ def lifecycle_steps() -> list[dict[str, str]]:
         {
             "step": "check",
             "command": "yt-scribe doctor",
-            "purpose": "Verify Python, Codex CLI, and PATH setup.",
+            "purpose": "Verify Python, agent harness, config, and PATH setup.",
         },
         {
             "step": "inspect",
@@ -468,12 +585,12 @@ def lifecycle_steps() -> list[dict[str, str]]:
         {
             "step": "fetch",
             "command": "yt-scribe fetch <youtube-url> --out transcript.txt",
-            "purpose": "Save the raw transcript without using Codex.",
+            "purpose": "Save the raw transcript without using an agent harness.",
         },
         {
             "step": "polish",
             "command": "yt-scribe polish transcript.txt --style notes --out notes.md",
-            "purpose": "Use codex exec on an existing transcript file.",
+            "purpose": "Use the configured agent harness on an existing transcript file.",
         },
         {
             "step": "run",
@@ -496,7 +613,7 @@ def run_codex_polish(
 
     with tempfile.TemporaryDirectory(prefix="yt-scribe-") as tmp_dir:
         final_path = Path(tmp_dir) / "final.md"
-        command = [
+        command = command_invocation(
             codex,
             "exec",
             "--ephemeral",
@@ -505,7 +622,7 @@ def run_codex_polish(
             "read-only",
             "--output-last-message",
             str(final_path),
-        ]
+        )
         if cwd:
             command.extend(["--cd", str(Path(cwd).expanduser().resolve())])
         if model:
@@ -536,9 +653,100 @@ def run_codex_polish(
         return {
             "output_path": written,
             "chars": len(polished),
+            "harness": "codex",
             "codex_stderr_tail": result.stderr[-2000:],
             "text": polished,
         }
+
+
+def run_opencode_polish(
+    transcript_text: str,
+    instruction: str,
+    out_path: str | None,
+    model: str | None,
+    cwd: str | None,
+) -> dict[str, Any]:
+    opencode = command_path("opencode")
+    if not opencode:
+        raise CliError("opencode was not found on PATH", "opencode_missing")
+
+    with tempfile.TemporaryDirectory(prefix="yt-scribe-") as tmp_dir:
+        transcript_path = Path(tmp_dir) / "transcript.txt"
+        transcript_path.write_text(transcript_text, encoding="utf-8")
+        command = command_invocation(
+            opencode,
+            "run",
+            instruction,
+            "--file",
+            str(transcript_path),
+            "--format",
+            "json",
+        )
+        if cwd:
+            command.extend(["--dir", str(Path(cwd).expanduser().resolve())])
+        if model:
+            command.extend(["--model", model])
+
+        result = subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise CliError(
+                "opencode run failed",
+                "opencode_run_failed",
+                {
+                    "returncode": result.returncode,
+                    "stderr_tail": result.stderr[-4000:],
+                },
+            )
+
+        polished = parse_opencode_run_output(result.stdout).strip() + "\n"
+        written = write_text(out_path, polished)
+        return {
+            "output_path": written,
+            "chars": len(polished),
+            "harness": "opencode",
+            "opencode_stderr_tail": result.stderr[-2000:],
+            "text": polished,
+        }
+
+
+def parse_opencode_run_output(output: str) -> str:
+    text_parts: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        part = event.get("part")
+        if event.get("type") == "text" and isinstance(part, dict):
+            text = part.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+    if text_parts:
+        return "".join(text_parts)
+    return output
+
+
+def run_agent_polish(
+    transcript_text: str,
+    instruction: str,
+    out_path: str | None,
+    model: str | None,
+    cwd: str | None,
+    harness: str,
+) -> dict[str, Any]:
+    if harness == "codex":
+        return run_codex_polish(transcript_text, instruction, out_path, model, cwd)
+    if harness == "opencode":
+        return run_opencode_polish(transcript_text, instruction, out_path, model, cwd)
+    raise CliError(f"Unsupported agent harness: {harness}", "unsupported_agent_harness")
 
 
 def emit(data: Any, as_json: bool, text: str | None = None) -> None:
@@ -575,7 +783,29 @@ def limit_text(text: str, max_chars: int) -> str:
     return text
 
 
+def selected_agent_harness(args: argparse.Namespace) -> str:
+    return args.agent_harness or effective_agent_harness()
+
+
 def handle_args(args: argparse.Namespace) -> int:
+    if args.command == "config":
+        config = read_config()
+        if args.config_command == "set":
+            config["default_agent_harness"] = args.value
+            write_config(config)
+        elif args.config_command == "unset":
+            config.pop("default_agent_harness", None)
+            write_config(config)
+
+        payload = {"ok": True, "config": config_payload(config)}
+        text = (
+            f"config: {config_path()}\n"
+            f"default_agent_harness: {payload['config']['default_agent_harness']}\n"
+            f"effective_agent_harness: {payload['config']['effective_agent_harness']}\n"
+        )
+        emit(payload, args.json, text)
+        return 0
+
     if args.command == "doctor":
         emit({"ok": True, "doctor": doctor_payload()}, args.json)
         return 0
@@ -646,18 +876,20 @@ def handle_args(args: argparse.Namespace) -> int:
             if args.stdout
             else args.out or str(default_polish_output_path(args.file, args.style))
         )
-        result = run_codex_polish(
+        result = run_agent_polish(
             transcript_text,
             read_instruction(args),
             out_path,
             args.model,
             args.cd,
+            selected_agent_harness(args),
         )
         payload = {
             "ok": True,
             "polish": {
                 "input_path": str(Path(args.file).expanduser().resolve()),
                 "style": args.style,
+                "agent_harness": result["harness"],
                 "output_path": result["output_path"],
                 "chars": result["chars"],
             },
@@ -680,12 +912,13 @@ def handle_args(args: argparse.Namespace) -> int:
             if args.stdout
             else args.out or str(default_run_output_path(transcript["video_id"], args.style))
         )
-        result = run_codex_polish(
+        result = run_agent_polish(
             transcript_text,
             read_instruction(args),
             out_path,
             args.model,
             args.cd,
+            selected_agent_harness(args),
         )
         payload = {
             "ok": True,
@@ -695,6 +928,7 @@ def handle_args(args: argparse.Namespace) -> int:
                 "language": transcript["language"],
                 "segments": len(transcript["segments"]),
                 "style": args.style,
+                "agent_harness": result["harness"],
                 "transcript_path": transcript_path,
                 "output_path": result["output_path"],
                 "chars": result["chars"],
@@ -747,9 +981,22 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--instruction", help="replace the built-in Codex prompt")
     parser.add_argument("--prompt-file", help="read the Codex prompt from a file")
-    parser.add_argument("--model", help="optional codex exec model override")
-    parser.add_argument("--cd", help="working directory to pass to codex exec")
-    parser.add_argument("--max-chars", type=int, default=0, help="truncate transcript before Codex")
+    parser.add_argument(
+        "--agent-harness",
+        choices=AGENT_HARNESSES,
+        help=(
+            "agent harness for polishing; defaults to config "
+            f"or {DEFAULT_AGENT_HARNESS}"
+        ),
+    )
+    parser.add_argument("--model", help="optional agent model override")
+    parser.add_argument("--cd", help="working directory to pass to the agent harness")
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=0,
+        help="truncate transcript before polish",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -773,6 +1020,22 @@ ai contract:
     parser.add_argument("--json", action="store_true", help="emit stable JSON output")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True, metavar="command")
+
+    config_parser = subparsers.add_parser("config", help="show or edit yt-scribe config")
+    config_subparsers = config_parser.add_subparsers(dest="config_command", metavar="command")
+    config_set_parser = config_subparsers.add_parser("set", help="set a config value")
+    config_set_parser.add_argument(
+        "key",
+        choices=["default-agent-harness"],
+        help="config key to set",
+    )
+    config_set_parser.add_argument("value", choices=AGENT_HARNESSES)
+    config_unset_parser = config_subparsers.add_parser("unset", help="clear a config value")
+    config_unset_parser.add_argument(
+        "key",
+        choices=["default-agent-harness"],
+        help="config key to clear",
+    )
 
     subparsers.add_parser("doctor", help="check Codex, Python, and PATH setup")
     subparsers.add_parser("lifecycle", help="print the recommended workflow")
