@@ -10,14 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from . import CliError, ProgressReporter
-from .cli import (
-    fetch_transcript_payload,
-    inspect_video_payload,
+from .config import VERSION
+from .polish import (
     polish_transcript_text_payload,
     run_youtube_polish_payload,
 )
-from .config import VERSION
-from .youtube import normalize_languages
+from .transcripts import fetch_transcript_payload
+from .youtube import (
+    inspect_video_payload,
+    normalize_languages,
+)
 
 COMMAND_NAME = "yt-scribe-mcp"
 READ_ONLY_ENV_VAR = "YT_SCRIBE_MCP_READ_ONLY"

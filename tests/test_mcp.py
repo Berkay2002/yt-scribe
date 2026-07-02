@@ -10,8 +10,9 @@ import tomllib
 
 import yt_scribe as package
 import yt_scribe_mcp
-from yt_scribe import cli as cli_adapter
-from yt_scribe import youtube
+from yt_scribe import transcripts, youtube
+from yt_scribe.polish import harnesses as polish_harnesses
+from yt_scribe.polish import workflows as polish_workflows
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "yt_scribe_mcp.py"
@@ -95,7 +96,7 @@ def test_mcp_inspect_returns_caption_metadata_without_network():
         youtube.CaptionTrack("Swedish", "sv", "https://example.test/sv", kind="asr"),
     ]
 
-    with patch.object(cli_adapter, "list_transcript_tracks", return_value=tracks):
+    with patch.object(youtube, "list_transcript_tracks", return_value=tracks):
         payload = yt_scribe_mcp.inspect_youtube_captions("dQw4w9WgXcQ")
 
     assert payload["ok"] is True
@@ -126,7 +127,7 @@ def test_mcp_fetch_returns_rendered_transcript_and_metadata_without_network():
     }
 
     with patch.object(
-        cli_adapter,
+        transcripts,
         "load_or_fetch_transcript",
         return_value=(transcript, {"status": "disabled", "path": None}),
     ) as load:
@@ -149,7 +150,7 @@ def test_mcp_fetch_returns_rendered_transcript_and_metadata_without_network():
 
 def test_mcp_fetch_preserves_transcript_error_code():
     with patch.object(
-        cli_adapter,
+        transcripts,
         "load_or_fetch_transcript",
         side_effect=package.CliError("No caption tracks were found", "no_captions"),
     ):
@@ -177,7 +178,7 @@ def test_mcp_fetch_reports_progress_when_context_is_available():
             progress_events.append((progress, total, message))
 
     with patch.object(
-        cli_adapter,
+        transcripts,
         "load_or_fetch_transcript",
         return_value=(transcript, {"status": "disabled", "path": None}),
     ):
@@ -207,16 +208,28 @@ def test_mcp_agent_tools_can_be_disabled_by_environment(monkeypatch):
 
 
 def test_mcp_agent_polish_uses_existing_harness_boundary():
-    with patch.object(
-        cli_adapter,
-        "run_agent_polish",
-        return_value={
-            "output_path": None,
-            "chars": len("polished\n"),
-            "harness": "codex",
-            "text": "polished\n",
-        },
-    ) as run_agent:
+    with (
+        patch.object(
+            polish_harnesses,
+            "run_agent_polish",
+            return_value={
+                "output_path": None,
+                "chars": len("polished\n"),
+                "harness": "codex",
+                "text": "polished\n",
+            },
+        ),
+        patch.object(
+            polish_workflows,
+            "run_agent_polish",
+            return_value={
+                "output_path": None,
+                "chars": len("polished\n"),
+                "harness": "codex",
+                "text": "polished\n",
+            },
+        ) as run_agent,
+    ):
         payload = yt_scribe_mcp.agent_polish_transcript(
             "raw transcript",
             focus="Keep only action items.",
@@ -248,12 +261,22 @@ def test_mcp_agent_run_fetches_and_polishes_without_live_harness():
 
     with (
         patch.object(
-            cli_adapter,
+            polish_workflows,
             "load_or_fetch_transcript",
             return_value=(transcript, {"status": "disabled", "path": None}),
         ) as load,
         patch.object(
-            cli_adapter,
+            polish_harnesses,
+            "run_agent_polish",
+            return_value={
+                "output_path": None,
+                "chars": len("notes\n"),
+                "harness": "codex",
+                "text": "notes\n",
+            },
+        ),
+        patch.object(
+            polish_workflows,
             "run_agent_polish",
             return_value={
                 "output_path": None,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -138,6 +139,39 @@ def setup_payload() -> dict[str, Any]:
             "run": "yt-scribe run <youtube-url>",
             "check": "yt-scribe doctor",
         },
+    }
+
+
+def init_project(project_dir: str | Path, profile: str | None = None) -> dict[str, Any]:
+    root = Path(project_dir).expanduser().resolve()
+    yt_scribe_dir = root / ".yt-scribe"
+    yt_scribe_dir.mkdir(parents=True, exist_ok=True)
+    guidance_path = yt_scribe_dir / "AGENTS.md"
+    config_path = yt_scribe_dir / "config.json"
+    guidance = (
+        "# yt-scribe\n\n"
+        "Use `yt-scribe` for YouTube transcript workflows in this project.\n\n"
+        "- Prefer `yt-scribe run \"<youtube-url>\"` for one-command notes.\n"
+        "- Use `yt-scribe inspect \"<youtube-url>\" --brief` before assuming captions exist.\n"
+        "- Do not bypass private, disabled, unavailable, or missing caption tracks.\n"
+        "- Do not add facts that are not in the transcript.\n"
+    )
+    guidance_path.write_text(guidance, encoding="utf-8")
+    config = {"profiles": {}}
+    if profile:
+        config["profiles"][profile] = {
+            "style": "notes",
+            "template": "research",
+            "front_matter": True,
+        }
+    config_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "dir": str(yt_scribe_dir),
+        "guidance_path": str(guidance_path),
+        "config_path": str(config_path),
     }
 
 

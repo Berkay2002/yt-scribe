@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
 
-from youtube_transcript_api.proxies import GenericProxyConfig
-
-from . import CliError, PolishInstruction, PolishOptions, ProgressReporter
+from . import CliError, ProgressReporter
 from .batch import (
     batch_output_path,
     default_polish_output_path,
@@ -40,13 +37,24 @@ from .config import (
     write_config,
 )
 from .polish import (
+    STYLE_INSTRUCTIONS,
+    TEMPLATE_INSTRUCTIONS,
+    apply_output_prefix,
     chunking_disabled_payload,
+    harness_label,
+    limit_text,
     opencode_server_config,
+    polish_transcript_text_payload,
+    render_front_matter,
+    resolve_instruction,
     run_agent_polish,
     run_chunked_agent_polish,
     run_codex_csv_fanout_engine,
     run_deep_fallback_engine,
+    run_front_matter,
+    run_front_matter_data,
     run_opencode_server_engine,
+    selected_agent_harness,
     write_codex_csv_fanout_metadata,
     write_opencode_server_metadata,
 )
@@ -67,8 +75,9 @@ from .runs import (
     write_deep_bundle_plan,
     write_text,
 )
-from .setup import install_skills, setup_payload
+from .setup import init_project, install_skills, setup_payload
 from .transcripts import (
+    fetch_transcript_payload,
     load_or_fetch_transcript,
     render_timestamped_transcript,
     render_transcript,
@@ -76,14 +85,13 @@ from .transcripts import (
 )
 from .verify import render_verification, verify_polished_file
 from .youtube import (
-    canonical_watch_url,
     choose_track,
     extract_video_id,
     fetch_raw_caption_tracks,
     fetch_video_duration_seconds,
     fetch_video_title,
     http_get,
-    list_transcript_tracks,
+    inspect_video_payload,
     requested_languages,
     select_run_workflow,
     timedtext_url,
@@ -91,243 +99,6 @@ from .youtube import (
 
 COMMAND_NAME = "yt-scribe"
 RUN_WORKFLOWS = ("auto", "quick", "deep")
-
-STYLE_INSTRUCTIONS = {
-    "clean": (
-        "Clean this YouTube transcript. Remove filler, repeated phrases, "
-        "timestamps, caption artifacts, and obvious speech disfluencies. "
-        "Preserve the speaker's meaning and order. Do not add facts that are "
-        "not in the transcript. Return only the cleaned text."
-    ),
-    "notes": (
-        "Turn this YouTube transcript into clear markdown notes. Preserve the "
-        "meaning and order. Use concise headings and bullets where helpful. "
-        "Remove filler and caption artifacts. Do not add facts that are not in "
-        "the transcript."
-    ),
-    "summary": (
-        "Summarize this YouTube transcript in plain markdown. Include the main "
-        "ideas, key details, and any concrete action items. Do not add facts "
-        "that are not in the transcript."
-    ),
-    "article": (
-        "Rewrite this YouTube transcript as a readable article in markdown. "
-        "Preserve the argument and sequence, remove filler, and avoid adding "
-        "facts that are not in the transcript."
-    ),
-}
-TIMESTAMP_GROUNDING_INSTRUCTION = (
-    "Timestamp grounding is requested. When the transcript includes timestamp anchors "
-    "such as [01:23], preserve useful anchors in the polished output so important "
-    "claims can be traced back to the transcript. Do not invent timestamps, and do "
-    "not add timestamp anchors for claims that are not supported by nearby transcript text."
-)
-TEMPLATE_INSTRUCTIONS = {
-    "lecture": (
-        "Use a lecture notes structure with concise section headings, key concepts, "
-        "definitions, examples, and open questions when they are present in the transcript."
-    ),
-    "research": (
-        "Use a research notes structure with claims, evidence, methods, limitations, "
-        "and follow-up questions when they are present in the transcript."
-    ),
-    "meeting": (
-        "Use a meeting-style structure with decisions, risks, action items, owners, "
-        "and deadlines only when they are present in the transcript."
-    ),
-}
-INNER_POLISHER_SKILL = "yt-scribe-transcript-polisher"
-HARNESS_INSTRUCTIONS = {
-    "codex": "harness/codex.md",
-    "opencode": "harness/opencode.md",
-}
-TRANSCRIPT_DELIVERY = {
-    "codex": "stdin",
-    "opencode": "an attached transcript file",
-}
-
-
-def inspect_video_payload(
-    url_or_id: str,
-    proxy_config: GenericProxyConfig | None = None,
-) -> dict[str, Any]:
-    video_id = extract_video_id(url_or_id)
-    duration_seconds = fetch_video_duration_seconds(video_id, proxy_config)
-    try:
-        tracks = list_transcript_tracks(video_id, proxy_config=proxy_config)
-    except CliError:
-        tracks = fetch_raw_caption_tracks(video_id, proxy_config)
-
-    manual_languages = [track.language_code for track in tracks if not track.auto_generated]
-    auto_generated_languages = [track.language_code for track in tracks if track.auto_generated]
-    return {
-        "id": video_id,
-        "url": canonical_watch_url(video_id),
-        "duration_seconds": duration_seconds,
-        "has_captions": bool(tracks),
-        "caption_tracks": len(tracks),
-        "languages": [track.language_code for track in tracks],
-        "manual_languages": manual_languages,
-        "auto_generated_languages": auto_generated_languages,
-        "tracks": [track.public_dict() for track in tracks],
-    }
-
-
-def fetch_transcript_payload(
-    url_or_id: str,
-    languages: list[str],
-    output_format: str,
-    cache_dir: Path | None = None,
-    resume: bool = False,
-    proxy_config: GenericProxyConfig | None = None,
-    timestamps: bool = False,
-    out_path: str | None = None,
-    include_transcript: bool = False,
-) -> tuple[dict[str, Any], str]:
-    if output_format not in {"text", "json", "srt"}:
-        raise CliError(
-            f"Unsupported transcript format: {output_format}",
-            "invalid_transcript_format",
-            {"format": output_format},
-        )
-
-    transcript, cache = load_or_fetch_transcript(
-        url_or_id,
-        languages,
-        cache_dir,
-        resume,
-        proxy_config,
-    )
-    rendered = (
-        render_timestamped_transcript(transcript) + "\n"
-        if timestamps and output_format == "text"
-        else render_transcript(transcript, output_format)
-    )
-    output_path = write_text(out_path, rendered)
-    fetch_payload = {
-        "video_id": transcript["video_id"],
-        "url": transcript["url"],
-        "language": transcript["language"],
-        "requested_languages": transcript["requested_languages"],
-        "track": transcript["track"],
-        "segments": len(transcript["segments"]),
-        "chars": len(transcript["text"]),
-        "source": transcript.get("source"),
-        "format": output_format,
-        "timestamped": timestamps and output_format == "text",
-        "output_path": output_path,
-        "cache": cache,
-    }
-    if include_transcript:
-        fetch_payload["transcript"] = rendered
-    return fetch_payload, rendered
-
-
-def init_project(project_dir: str | Path, profile: str | None = None) -> dict[str, Any]:
-    root = Path(project_dir).expanduser().resolve()
-    yt_scribe_dir = root / ".yt-scribe"
-    yt_scribe_dir.mkdir(parents=True, exist_ok=True)
-    guidance_path = yt_scribe_dir / "AGENTS.md"
-    config_path = yt_scribe_dir / "config.json"
-    guidance = (
-        "# yt-scribe\n\n"
-        "Use `yt-scribe` for YouTube transcript workflows in this project.\n\n"
-        "- Prefer `yt-scribe run \"<youtube-url>\"` for one-command notes.\n"
-        "- Use `yt-scribe inspect \"<youtube-url>\" --brief` before assuming captions exist.\n"
-        "- Do not bypass private, disabled, unavailable, or missing caption tracks.\n"
-        "- Do not add facts that are not in the transcript.\n"
-    )
-    guidance_path.write_text(guidance, encoding="utf-8")
-    config = {"profiles": {}}
-    if profile:
-        config["profiles"][profile] = {
-            "style": "notes",
-            "template": "research",
-            "front_matter": True,
-        }
-    config_path.write_text(
-        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return {
-        "dir": str(yt_scribe_dir),
-        "guidance_path": str(guidance_path),
-        "config_path": str(config_path),
-    }
-
-
-def front_matter_scalar(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is None:
-        return "null"
-    text = str(value)
-    if not text:
-        return '""'
-    if re.search(r"[:#\n\r\[\]{}]", text):
-        return json.dumps(text, ensure_ascii=False)
-    return text
-
-
-def render_front_matter(data: dict[str, Any]) -> str:
-    lines = ["---"]
-    for key, value in data.items():
-        if isinstance(value, list):
-            lines.append(f"{key}:")
-            if value:
-                lines.extend(f"  - {front_matter_scalar(item)}" for item in value)
-            else:
-                lines.append("  []")
-        else:
-            lines.append(f"{key}: {front_matter_scalar(value)}")
-    lines.append("---")
-    return "\n".join(lines) + "\n\n"
-
-
-def run_front_matter_data(
-    transcript: dict[str, Any],
-    style: str,
-    instruction: PolishInstruction,
-    harness: str,
-) -> dict[str, Any]:
-    track = transcript.get("track") or {}
-    return {
-        "video_id": transcript.get("video_id"),
-        "url": transcript.get("url"),
-        "language": transcript.get("language"),
-        "caption_name": track.get("name"),
-        "caption_auto_generated": track.get("auto_generated"),
-        "segments": len(transcript.get("segments") or []),
-        "transcript_chars": len(transcript.get("text") or ""),
-        "style": style,
-        "instruction_mode": instruction.mode,
-        "instruction_sources": instruction.sources,
-        "agent_harness": harness,
-    }
-
-
-def run_front_matter(
-    transcript: dict[str, Any],
-    style: str,
-    instruction: PolishInstruction,
-    harness: str,
-) -> str:
-    return render_front_matter(run_front_matter_data(transcript, style, instruction, harness))
-
-
-def apply_output_prefix(result: dict[str, Any], prefix: str) -> dict[str, Any]:
-    if not prefix:
-        return result
-
-    if result["output_path"]:
-        path = Path(result["output_path"])
-        final_text = prefix + path.read_text(encoding="utf-8")
-        path.write_text(final_text, encoding="utf-8")
-    else:
-        final_text = prefix + result["text"]
-        result = {**result, "text": final_text}
-
-    return {**result, "chars": len(final_text)}
 
 
 def emit(data: Any, as_json: bool, text: str | None = None) -> None:
@@ -348,287 +119,6 @@ def emit_error(exc: CliError, as_json: bool) -> int:
         if exc.details.get("stderr_tail"):
             print(exc.details["stderr_tail"], file=sys.stderr)
     return 1
-
-
-def style_instruction(style: str, harness: str) -> str:
-    harness_file = HARNESS_INSTRUCTIONS[harness]
-    delivery = TRANSCRIPT_DELIVERY[harness]
-    return (
-        f"Use the {INNER_POLISHER_SKILL} skill if it is available. "
-        f"For this run, follow its {harness_file} instructions. "
-        f"{STYLE_INSTRUCTIONS[style]} "
-        f"The transcript is provided by yt-scribe on {delivery}."
-    )
-
-
-def custom_instruction_parts(
-    args: argparse.Namespace | PolishOptions,
-) -> tuple[list[str], list[str]]:
-    parts: list[str] = []
-    sources: list[str] = []
-
-    template = getattr(args, "template", None)
-    if template:
-        parts.append(TEMPLATE_INSTRUCTIONS[template])
-        sources.append("--template")
-
-    for focus in getattr(args, "focus", None) or []:
-        focus = focus.strip()
-        if focus:
-            parts.append(focus)
-            sources.append("--focus")
-
-    for focus_file in getattr(args, "focus_file", None) or []:
-        content = Path(focus_file).expanduser().read_text(encoding="utf-8").strip()
-        if content:
-            parts.append(content)
-            sources.append("--focus-file")
-
-    return parts, sources
-
-
-def resolve_instruction(
-    args: argparse.Namespace | PolishOptions,
-    harness: str,
-) -> PolishInstruction:
-    timestamp_sources = ["--timestamps"] if getattr(args, "timestamps", False) else []
-    replacement_sources = [
-        source
-        for source, value in (
-            ("--instruction", getattr(args, "instruction", None)),
-            ("--prompt-file", getattr(args, "prompt_file", None)),
-        )
-        if value
-    ]
-    custom_parts, custom_sources = custom_instruction_parts(args)
-
-    if len(replacement_sources) > 1:
-        raise CliError(
-            "Use only one full prompt replacement option: --instruction or --prompt-file",
-            "conflicting_instruction_options",
-        )
-    if replacement_sources and custom_parts:
-        raise CliError(
-            "Use --focus/--focus-file to extend the built-in prompt, or "
-            "--instruction/--prompt-file to replace it, not both.",
-            "conflicting_instruction_options",
-        )
-
-    if getattr(args, "prompt_file", None):
-        text = Path(args.prompt_file).expanduser().read_text(encoding="utf-8").strip()
-        if timestamp_sources:
-            text += f"\n\n{TIMESTAMP_GROUNDING_INSTRUCTION}"
-        return PolishInstruction(
-            text=text,
-            mode="replace",
-            sources=["--prompt-file", *timestamp_sources],
-        )
-    if getattr(args, "instruction", None):
-        text = args.instruction.strip()
-        if timestamp_sources:
-            text += f"\n\n{TIMESTAMP_GROUNDING_INSTRUCTION}"
-        return PolishInstruction(
-            text=text,
-            mode="replace",
-            sources=["--instruction", *timestamp_sources],
-        )
-
-    text = style_instruction(getattr(args, "style", "notes"), harness)
-    if timestamp_sources:
-        text += f"\n\n{TIMESTAMP_GROUNDING_INSTRUCTION}"
-    if not custom_parts:
-        return PolishInstruction(text=text, mode="style", sources=["--style", *timestamp_sources])
-
-    custom_text = "\n\n".join(custom_parts)
-    text += (
-        "\n\nCustom user instructions for this run:\n"
-        "Follow these instructions even when they narrow or change the selected "
-        "style. They do not allow adding facts that are not in the transcript.\n\n"
-        f"{custom_text}"
-    )
-    return PolishInstruction(
-        text=text,
-        mode="custom",
-        sources=[*custom_sources, *timestamp_sources],
-    )
-
-
-def read_instruction(args: argparse.Namespace, harness: str) -> str:
-    return resolve_instruction(args, harness).text
-
-
-def limit_text(text: str, max_chars: int) -> str:
-    if max_chars and len(text) > max_chars:
-        return text[:max_chars]
-    return text
-
-
-def selected_agent_harness(args: argparse.Namespace | PolishOptions) -> str:
-    return args.agent_harness or effective_agent_harness()
-
-
-def harness_label(harness: str) -> str:
-    return {"codex": "Codex", "opencode": "OpenCode"}.get(harness, harness)
-
-
-def polish_options(
-    *,
-    style: str | None = None,
-    template: str | None = None,
-    focus: list[str] | None = None,
-    focus_file: list[str] | None = None,
-    instruction: str | None = None,
-    prompt_file: str | None = None,
-    timestamps: bool = False,
-    agent_harness: str | None = None,
-    model: str | None = None,
-    cd: str | None = None,
-    max_chars: int = 0,
-) -> PolishOptions:
-    return PolishOptions(
-        style=style or "notes",
-        template=template,
-        focus=focus,
-        focus_file=focus_file,
-        instruction=instruction,
-        prompt_file=prompt_file,
-        timestamps=timestamps,
-        agent_harness=agent_harness,
-        model=model,
-        cd=cd,
-        max_chars=max_chars,
-    )
-
-
-def polish_transcript_text_payload(
-    transcript_text: str,
-    *,
-    style: str | None = None,
-    template: str | None = None,
-    focus: list[str] | None = None,
-    focus_file: list[str] | None = None,
-    instruction: str | None = None,
-    prompt_file: str | None = None,
-    timestamps: bool = False,
-    agent_harness: str | None = None,
-    model: str | None = None,
-    cwd: str | None = None,
-    max_chars: int = 0,
-    out_path: str | None = None,
-    input_path: str | None = None,
-    progress: ProgressReporter | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    options = polish_options(
-        style=style,
-        template=template,
-        focus=focus,
-        focus_file=focus_file,
-        instruction=instruction,
-        prompt_file=prompt_file,
-        timestamps=timestamps,
-        agent_harness=agent_harness,
-        model=model,
-        cd=cwd,
-        max_chars=max_chars,
-    )
-    transcript_text = limit_text(transcript_text, max_chars)
-    harness = selected_agent_harness(options)
-    resolved_instruction = resolve_instruction(options, harness)
-    if progress:
-        progress.message(f"Using {harness_label(harness)}")
-    result = run_agent_polish(
-        transcript_text=transcript_text,
-        instruction=resolved_instruction.text,
-        out_path=out_path,
-        model=model,
-        cwd=cwd,
-        harness=harness,
-        progress=progress,
-    )
-    payload = {
-        "input_path": input_path,
-        "style": options.style,
-        "instruction_mode": resolved_instruction.mode,
-        "instruction_sources": resolved_instruction.sources,
-        "timestamp_grounding": timestamps,
-        "agent_harness": result["harness"],
-        "output_path": result["output_path"],
-        "chars": result["chars"],
-    }
-    return payload, result
-
-
-def run_youtube_polish_payload(
-    url_or_id: str,
-    *,
-    languages: list[str],
-    transcript_format: str = "text",
-    cache_dir: Path | None = None,
-    resume: bool = False,
-    proxy_config: GenericProxyConfig | None = None,
-    transcript_out_path: str | None = None,
-    style: str | None = None,
-    template: str | None = None,
-    focus: list[str] | None = None,
-    focus_file: list[str] | None = None,
-    instruction: str | None = None,
-    prompt_file: str | None = None,
-    timestamps: bool = False,
-    agent_harness: str | None = None,
-    model: str | None = None,
-    cwd: str | None = None,
-    max_chars: int = 0,
-    out_path: str | None = None,
-    progress: ProgressReporter | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    transcript, cache = load_or_fetch_transcript(
-        url_or_id,
-        languages,
-        cache_dir,
-        resume,
-        proxy_config,
-    )
-    rendered = render_transcript(transcript, transcript_format)
-    transcript_path = write_text(transcript_out_path, rendered)
-    transcript_text = (
-        render_timestamped_transcript(transcript) if timestamps else transcript["text"]
-    )
-    polish_payload, result = polish_transcript_text_payload(
-        transcript_text,
-        style=style,
-        template=template,
-        focus=focus,
-        focus_file=focus_file,
-        instruction=instruction,
-        prompt_file=prompt_file,
-        timestamps=timestamps,
-        agent_harness=agent_harness,
-        model=model,
-        cwd=cwd,
-        max_chars=max_chars,
-        out_path=out_path,
-        progress=progress,
-    )
-    payload = {
-        "video_id": transcript["video_id"],
-        "url": transcript["url"],
-        "language": transcript["language"],
-        "requested_languages": transcript.get("requested_languages", languages),
-        "segments": len(transcript["segments"]),
-        "style": polish_payload["style"],
-        "instruction_mode": polish_payload["instruction_mode"],
-        "instruction_sources": polish_payload["instruction_sources"],
-        "timestamp_grounding": timestamps,
-        "agent_harness": result["harness"],
-        "transcript_path": transcript_path,
-        "output_path": result["output_path"],
-        "chars": result["chars"],
-        "front_matter": False,
-        "chunking": chunking_disabled_payload(),
-        "cache": cache,
-        "bundle": None,
-    }
-    return payload, result
 
 
 def handle_args(args: argparse.Namespace) -> int:

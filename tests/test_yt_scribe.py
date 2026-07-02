@@ -11,30 +11,40 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import yt_scribe as package
-from yt_scribe import _legacy as legacy
-from yt_scribe import batch, cli, config, polish, runs, setup, transcripts, verify, youtube
+from yt_scribe import batch, cli, config, polish, runs, transcripts, verify, youtube
+from yt_scribe.polish import chunked as polish_chunked
+from yt_scribe.polish import deep as polish_deep
+from yt_scribe.polish import harnesses as polish_harnesses
+from yt_scribe.polish import workflows as polish_workflows
+
+PATCH_TARGETS = {
+    "fetch_transcript": (youtube, transcripts),
+    "fetch_playlist_video_ids": (youtube, batch),
+    "fetch_video_duration_seconds": (youtube, cli),
+    "fetch_video_title": (youtube, cli),
+    "list_transcript_tracks": (youtube,),
+    "fetch_raw_caption_tracks": (youtube, cli),
+    "load_or_fetch_transcript": (transcripts, cli, polish_workflows),
+    "run_agent_polish": (
+        polish,
+        cli,
+        polish_harnesses,
+        polish_chunked,
+        polish_deep,
+        polish_workflows,
+    ),
+    "run_codex_csv_fanout_jobs": (polish, polish_deep),
+    "run_opencode_server_session": (polish, polish_deep),
+}
 
 
 @contextlib.contextmanager
 def patch_cli_workflow(name, **mock_kwargs):
     replacement = Mock(**mock_kwargs)
-    targets = (
-        cli,
-        package,
-        legacy,
-        youtube,
-        transcripts,
-        polish,
-        batch,
-        runs,
-        verify,
-        config,
-        setup,
-    )
+    targets = PATCH_TARGETS[name]
     with contextlib.ExitStack() as stack:
         for target in targets:
-            if hasattr(target, name):
-                stack.enter_context(patch.object(target, name, replacement))
+            stack.enter_context(patch.object(target, name, replacement))
         yield replacement
 
 
@@ -509,8 +519,8 @@ class YtScribeTests(unittest.TestCase):
 
         self_outer = self
         with (
-            patch.object(legacy, "command_path", return_value="opencode"),
-            patch.object(legacy.subprocess, "Popen", FakePopen),
+            patch.object(polish_harnesses, "command_path", return_value="opencode"),
+            patch.object(polish_harnesses.subprocess, "Popen", FakePopen),
         ):
             result = polish.run_agent_polish(
                 "raw transcript",
@@ -595,8 +605,8 @@ class YtScribeTests(unittest.TestCase):
 
         stderr = io.StringIO()
         with (
-            patch.object(legacy, "command_path", return_value="opencode"),
-            patch.object(legacy.subprocess, "Popen", FakePopen),
+            patch.object(polish_harnesses, "command_path", return_value="opencode"),
+            patch.object(polish_harnesses.subprocess, "Popen", FakePopen),
             contextlib.redirect_stderr(stderr),
         ):
             result = polish.run_agent_polish(
@@ -685,8 +695,8 @@ class YtScribeTests(unittest.TestCase):
 
         stderr = io.StringIO()
         with (
-            patch.object(legacy, "command_path", return_value="codex"),
-            patch.object(legacy.subprocess, "Popen", FakePopen),
+            patch.object(polish_harnesses, "command_path", return_value="codex"),
+            patch.object(polish_harnesses.subprocess, "Popen", FakePopen),
             contextlib.redirect_stderr(stderr),
         ):
             result = polish.run_agent_polish(
@@ -919,7 +929,7 @@ class YtScribeTests(unittest.TestCase):
                 "text": "chunk ok\n",
             }
 
-        with patch.object(legacy, "run_agent_polish", side_effect=fake_polish):
+        with patch.object(polish_chunked, "run_agent_polish", side_effect=fake_polish):
             with self.assertRaises(package.CliError) as error:
                 polish.run_chunked_agent_polish(
                     chunks=["first", "second"],
@@ -967,7 +977,7 @@ class YtScribeTests(unittest.TestCase):
                     "text": "merged\n",
                 }
 
-            with patch.object(legacy, "run_agent_polish", side_effect=fake_polish):
+            with patch.object(polish_chunked, "run_agent_polish", side_effect=fake_polish):
                 result = polish.run_chunked_agent_polish(
                     chunks=["first", "second"],
                     instruction="Polish.",

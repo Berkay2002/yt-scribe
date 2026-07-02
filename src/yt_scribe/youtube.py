@@ -230,6 +230,32 @@ def select_run_workflow(
     }
 
 
+def inspect_video_payload(
+    url_or_id: str,
+    proxy_config: GenericProxyConfig | None = None,
+) -> dict[str, Any]:
+    video_id = extract_video_id(url_or_id)
+    duration_seconds = fetch_video_duration_seconds(video_id, proxy_config)
+    try:
+        tracks = list_transcript_tracks(video_id, proxy_config=proxy_config)
+    except CliError:
+        tracks = fetch_raw_caption_tracks(video_id, proxy_config)
+
+    manual_languages = [track.language_code for track in tracks if not track.auto_generated]
+    auto_generated_languages = [track.language_code for track in tracks if track.auto_generated]
+    return {
+        "id": video_id,
+        "url": canonical_watch_url(video_id),
+        "duration_seconds": duration_seconds,
+        "has_captions": bool(tracks),
+        "caption_tracks": len(tracks),
+        "languages": [track.language_code for track in tracks],
+        "manual_languages": manual_languages,
+        "auto_generated_languages": auto_generated_languages,
+        "tracks": [track.public_dict() for track in tracks],
+    }
+
+
 def caption_name(track: dict[str, Any]) -> str:
     name = track.get("name", {})
     if isinstance(name, dict):

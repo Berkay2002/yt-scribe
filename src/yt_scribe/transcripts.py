@@ -9,6 +9,7 @@ from typing import Any
 
 from youtube_transcript_api.proxies import GenericProxyConfig
 
+from . import CliError
 from .youtube import extract_video_id, fetch_transcript
 
 DEEP_CHUNK_TARGET_SECONDS = 10 * 60
@@ -133,6 +134,60 @@ def load_or_fetch_transcript(
         status = "written" if not resume else "miss_written"
         return transcript, {"status": status, "path": str(path)}
     return transcript, {"status": "disabled", "path": None}
+
+
+def fetch_transcript_payload(
+    url_or_id: str,
+    languages: list[str],
+    output_format: str,
+    cache_dir: Path | None = None,
+    resume: bool = False,
+    proxy_config: GenericProxyConfig | None = None,
+    timestamps: bool = False,
+    out_path: str | None = None,
+    include_transcript: bool = False,
+) -> tuple[dict[str, Any], str]:
+    if output_format not in {"text", "json", "srt"}:
+        raise CliError(
+            f"Unsupported transcript format: {output_format}",
+            "invalid_transcript_format",
+            {"format": output_format},
+        )
+
+    transcript, cache = load_or_fetch_transcript(
+        url_or_id,
+        languages,
+        cache_dir,
+        resume,
+        proxy_config,
+    )
+    rendered = (
+        render_timestamped_transcript(transcript) + "\n"
+        if timestamps and output_format == "text"
+        else render_transcript(transcript, output_format)
+    )
+    from .runs import write_text
+
+    output_path = write_text(out_path, rendered)
+    fetch_payload = {
+        "video_id": transcript["video_id"],
+        "url": transcript["url"],
+        "language": transcript["language"],
+        "requested_languages": transcript["requested_languages"],
+        "track": transcript["track"],
+        "segments": len(transcript["segments"]),
+        "chars": len(transcript["text"]),
+        "source": transcript.get("source"),
+        "format": output_format,
+        "timestamped": timestamps and output_format == "text",
+        "output_path": output_path,
+        "cache": cache,
+    }
+    if include_transcript:
+        fetch_payload["transcript"] = rendered
+    return fetch_payload, rendered
+
+
 def segment_start(segment: dict[str, Any]) -> float:
     return float(segment.get("start") or 0)
 

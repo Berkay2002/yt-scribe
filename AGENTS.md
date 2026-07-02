@@ -55,8 +55,8 @@ do not copy it into the plugin `skills/` tree.
 Keep embedded skill assets exposed as `yt_scribe.EMBEDDED_SKILL_ASSETS` in sync
 with the files under `skills/` and `.agents/skills/` when changing setup,
 plugin, or install behavior. The current embedded source lives in
-`src/yt_scribe/_legacy.py`; do not import `_legacy` from new code except while
-unwinding the remaining transitional polish internals.
+`src/yt_scribe/_legacy.py` alongside shared compatibility primitives. Do not
+import `_legacy` from new code.
 
 ## Advanced Workflow Features
 
