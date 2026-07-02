@@ -179,10 +179,38 @@ For the one-command path:
 
 ```sh
 yt-scribe --json run "<youtube-url>"
+yt-scribe --json run "<youtube-url>" --workflow quick
+yt-scribe --json run "<youtube-url>" --workflow deep
 yt-scribe --json run "<youtube-url>" --focus "Keep only action items"
 yt-scribe --json run "<youtube-url>" --timestamps
 yt-scribe --json run "<youtube-url>" --bundle-dir .yt-scribe/runs/VIDEO_ID
 ```
+
+`run` defaults to `--workflow auto`. Auto mode uses duration metadata when it is
+available and selects the deep workflow for videos at least 45 minutes long.
+Shorter videos keep quick behavior. If duration is missing, caption availability
+is still checked separately and auto mode stays quick.
+
+Use deep mode when a long video needs durable artifacts or follow-up questions.
+Deep mode preserves exact transcript JSON, timestamped transcript text, chunk
+files, per-chunk notes, merged final notes, metadata, and structural checks.
+Default managed deep runs are stored outside the current project. Use
+`--bundle-dir` only when the user wants artifacts in a specific directory.
+
+Useful follow-up commands:
+
+```sh
+yt-scribe --json runs list
+yt-scribe --json runs open <run-name>
+yt-scribe --json runs rename <run-name> "Project vocabulary"
+yt-scribe --json run "<youtube-url>" --workflow deep --bundle-dir "<bundle-dir>" --resume
+yt-scribe --json ask <run-name> "What did they say about retrieval?" --show-context
+yt-scribe --json ask <run-name> "What did they say about retrieval?" --agent
+```
+
+Use `ask --show-context` before `ask --agent` when the user wants to inspect
+retrieved source snippets before spending agent tokens. Agent-backed `ask`
+passes only retrieved outline, chunk-note, and transcript context to the harness.
 
 Use styles intentionally:
 
@@ -243,6 +271,18 @@ the transcript through stdin. The polishing prompt asks for the
 instructions. The CLI streams Codex JSON events as human progress and writes
 final Codex output through `--output-last-message`, so prefer `--out` when the
 user expects a file.
+
+For long videos, `yt-scribe run` defaults to `--workflow auto` and selects deep
+mode at 45 minutes when duration metadata is available. Codex is the default
+deep harness. Deep mode tries Codex CSV fan-out for one transcript chunk per
+worker when that seam is available, then falls back to managed per-chunk Codex
+calls. The output contract is the same either way: exact transcript JSON,
+timestamped transcript text, chunk files, per-chunk notes, merged final notes,
+metadata, and structural verification.
+
+After a deep run, use `yt-scribe --json runs list`, `yt-scribe --json runs open
+<run-name>`, and `yt-scribe --json ask <run-name> "<question>" --show-context`
+to inspect reusable artifacts before asking an agent.
 """,
     ".agents/skills/yt-scribe/harness/opencode.md": """# OpenCode Harness
 
@@ -268,6 +308,18 @@ temp file. The polishing prompt asks for the shared
 instructions. The CLI streams OpenCode JSON events as human progress and reads
 the final output from text events. It uses OpenCode's `--thinking` flag for
 reasoning event summaries. Prefer `--out` when the user expects a file.
+
+For long videos, `yt-scribe run` defaults to `--workflow auto` and selects deep
+mode at 45 minutes when duration metadata is available. Select OpenCode with
+`--agent-harness opencode` or config. OpenCode deep mode first tries
+local server/session orchestration using local-only defaults, then falls back to
+managed per-chunk OpenCode calls if server orchestration is unavailable or does
+not produce the expected bundle artifacts. It does not write project-local
+`.opencode/` config for a one-off deep run.
+
+After a deep run, use `yt-scribe --json runs list`, `yt-scribe --json runs open
+<run-name>`, and `yt-scribe --json ask <run-name> "<question>" --show-context`
+to inspect reusable artifacts before asking an agent.
 """,
     ".agents/skills/yt-scribe/agents/openai.yaml": """interface:
   display_name: "YT Scribe"
@@ -2640,6 +2692,22 @@ def ask_agent_instruction(question: str) -> str:
     )
 
 
+def deep_next_commands(managed_run: dict[str, Any] | None, bundle_dir: str | None) -> list[str]:
+    if managed_run:
+        selector = str(managed_run["name"])
+        bundle_path = str(managed_run["bundle_path"])
+    else:
+        selector = "<run-name>"
+        bundle_path = str(Path(bundle_dir).expanduser().resolve()) if bundle_dir else "<bundle-dir>"
+    return [
+        f"{COMMAND_NAME} runs list",
+        f"{COMMAND_NAME} runs open {selector}",
+        f'{COMMAND_NAME} runs rename {selector} "<new name>"',
+        f'{COMMAND_NAME} run "<youtube-url>" --workflow deep --bundle-dir "{bundle_path}" --resume',
+        f'{COMMAND_NAME} ask {selector} "<question>" --show-context',
+    ]
+
+
 def init_project(project_dir: str | Path, profile: str | None = None) -> dict[str, Any]:
     root = Path(project_dir).expanduser().resolve()
     yt_scribe_dir = root / ".yt-scribe"
@@ -4422,6 +4490,11 @@ def handle_args(args: argparse.Namespace) -> int:
                 "cache": cache,
                 "bundle": None,
                 "managed_run": managed_run,
+                "next_commands": (
+                    deep_next_commands(managed_run, bundle["dir"])
+                    if deep_bundle and bundle
+                    else []
+                ),
             },
         }
         if bundle:
@@ -4494,9 +4567,15 @@ def handle_args(args: argparse.Namespace) -> int:
         if args.json:
             emit(payload, True)
         elif result["output_path"]:
+            next_text = ""
+            if payload["run"]["next_commands"]:
+                next_text = "Next:\n" + "\n".join(
+                    f"  {command}" for command in payload["run"]["next_commands"]
+                ) + "\n"
             text = (
                 f"Workflow: {workflow['workflow']} ({workflow['workflow_reason']})\n"
                 f"Wrote polished transcript to {result['output_path']}\n"
+                f"{next_text}"
             )
             emit(payload, False, text)
         else:
@@ -4906,7 +4985,11 @@ ai contract:
 
     ask_parser = subparsers.add_parser(
         "ask",
-        help="retrieve context from a completed deep run and answer a question",
+        help="ask questions against a completed deep run",
+        description=(
+            "Retrieve relevant outline, chunk-note, and transcript context from a "
+            "completed deep run before optionally invoking an agent."
+        ),
     )
     ask_parser.add_argument("selector", help="run name, video ID, or unambiguous prefix")
     ask_parser.add_argument("question", nargs="+", help="question to ask against the run")
@@ -4966,7 +5049,8 @@ ai contract:
         help="fetch and polish in one command",
         description=(
             "Fetch a YouTube transcript and write notes to "
-            "yt-scribe-<video-id>-notes.md by default."
+            "yt-scribe-<video-id>-notes.md by default. Workflow auto-selection "
+            "uses the deep bundle workflow for videos at least 45 minutes long."
         ),
     )
     run_parser.add_argument("url", help="YouTube URL or 11-character video ID")
@@ -4988,7 +5072,7 @@ ai contract:
         "--workflow",
         choices=RUN_WORKFLOWS,
         default="auto",
-        help="run workflow selection, default: auto",
+        help="auto selects deep at 45 minutes; quick and deep override selection",
     )
     run_parser.add_argument(
         "--bundle-dir",

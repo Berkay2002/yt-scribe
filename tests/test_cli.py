@@ -57,6 +57,7 @@ def test_run_help_exposes_chunking_option():
 
     assert result.returncode == 0
     assert "--workflow" in result.stdout
+    assert "45 minutes" in result.stdout
     assert "--chunk-chars" in result.stdout
     assert "--bundle-dir" in result.stdout
 
@@ -76,6 +77,32 @@ def test_ask_help_exposes_context_and_agent_modes():
     assert result.returncode == 0
     assert "--show-context" in result.stdout
     assert "--agent" in result.stdout
+
+
+def test_readme_documents_long_video_deep_workflow():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "Long-video deep workflow" in readme
+    assert "yt-scribe runs list" in readme
+    assert "yt-scribe ask <run-name>" in readme
+    assert "workflow_threshold_seconds" in readme
+    assert "does not transcribe audio" in readme
+    assert "does not bypass" in readme
+
+
+def test_agent_skill_documents_long_video_workflow():
+    skill = (ROOT / "skills" / "yt-scribe" / "SKILL.md").read_text(encoding="utf-8")
+    codex = (ROOT / "skills" / "yt-scribe" / "harness" / "codex.md").read_text(
+        encoding="utf-8"
+    )
+    opencode = (ROOT / "skills" / "yt-scribe" / "harness" / "opencode.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--workflow deep" in skill
+    assert "ask <run-name>" in skill
+    assert "Codex CSV fan-out" in codex
+    assert "local server/session orchestration" in opencode
 
 
 def test_init_project_help_exposes_project_directory():

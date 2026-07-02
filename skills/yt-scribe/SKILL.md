@@ -71,10 +71,38 @@ For the one-command path:
 
 ```sh
 yt-scribe --json run "<youtube-url>"
+yt-scribe --json run "<youtube-url>" --workflow quick
+yt-scribe --json run "<youtube-url>" --workflow deep
 yt-scribe --json run "<youtube-url>" --focus "Keep only action items"
 yt-scribe --json run "<youtube-url>" --timestamps
 yt-scribe --json run "<youtube-url>" --bundle-dir .yt-scribe/runs/VIDEO_ID
 ```
+
+`run` defaults to `--workflow auto`. Auto mode uses duration metadata when it is
+available and selects the deep workflow for videos at least 45 minutes long.
+Shorter videos keep quick behavior. If duration is missing, caption availability
+is still checked separately and auto mode stays quick.
+
+Use deep mode when a long video needs durable artifacts or follow-up questions.
+Deep mode preserves exact transcript JSON, timestamped transcript text, chunk
+files, per-chunk notes, merged final notes, metadata, and structural checks.
+Default managed deep runs are stored outside the current project. Use
+`--bundle-dir` only when the user wants artifacts in a specific directory.
+
+Useful follow-up commands:
+
+```sh
+yt-scribe --json runs list
+yt-scribe --json runs open <run-name>
+yt-scribe --json runs rename <run-name> "Project vocabulary"
+yt-scribe --json run "<youtube-url>" --workflow deep --bundle-dir "<bundle-dir>" --resume
+yt-scribe --json ask <run-name> "What did they say about retrieval?" --show-context
+yt-scribe --json ask <run-name> "What did they say about retrieval?" --agent
+```
+
+Use `ask --show-context` before `ask --agent` when the user wants to inspect
+retrieved source snippets before spending agent tokens. Agent-backed `ask`
+passes only retrieved outline, chunk-note, and transcript context to the harness.
 
 Use styles intentionally:
 

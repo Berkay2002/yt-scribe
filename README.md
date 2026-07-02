@@ -260,6 +260,8 @@ Fetches the transcript and polishes it in one command.
 
 ```sh
 yt-scribe run "<url>"
+yt-scribe run "<url>" --workflow quick
+yt-scribe run "<url>" --workflow deep
 yt-scribe run "<url>" --style summary
 yt-scribe run "<url>" --focus "Extract only action items and owner names"
 yt-scribe run "<url>" --timestamps
@@ -271,6 +273,11 @@ yt-scribe run "<url>" --agent-harness opencode
 For normal human runs, fetch and polish progress is written to stderr. The final
 path or polished text stays on stdout. `--json` suppresses progress and keeps
 stdout machine-readable.
+
+`run` uses `--workflow auto` by default. Auto mode inspects video duration when
+available and selects the deep workflow for videos at least 45 minutes long.
+Use `--workflow quick` or `--workflow deep` when you need to override the
+decision.
 
 `config`
 
@@ -352,6 +359,9 @@ and agent automation. The normal `yt-scribe run "<url>"` path does not require t
 - `--cache-dir` and `--resume`: explicit transcript cache reuse.
 - `--chunk-chars`: chunk-and-merge polishing for long transcripts.
 - `--bundle-dir`: write transcript, polished output, and metadata together.
+- `--workflow deep`: durable long-video bundle, chunk plan, per-chunk notes, and follow-up commands.
+- `runs list/open/rename`: manage saved deep runs.
+- `ask`: retrieve context from a completed deep run and optionally ask an agent.
 - `verify`: check polished output against a transcript artifact.
 - `batch`: process URL lists or playlist URLs and write a manifest.
 
@@ -411,6 +421,55 @@ matter data when enabled, and manifest or verification record slots when present
 
 </details>
 
+<details>
+<summary>Long-video deep workflow</summary>
+
+`yt-scribe run "<youtube-url>"` defaults to `--workflow auto`. When duration
+metadata is available and the video is at least 45 minutes long, auto mode uses
+the deep workflow. Shorter videos keep the quick one-pass behavior. If duration
+metadata is missing, auto mode keeps quick behavior and still checks captions
+separately.
+
+Force either path when needed:
+
+```sh
+yt-scribe run "<youtube-url>" --workflow quick
+yt-scribe run "<youtube-url>" --workflow deep
+```
+
+Deep runs create a managed bundle outside the current project unless you pass
+`--bundle-dir`. The bundle preserves:
+
+- `transcript.json`: exact transcript segments.
+- `transcript.txt`: readable timestamped transcript text.
+- `chunks/`: timestamp-aware chunk text and per-chunk notes.
+- `chunk-manifest.json`: chunk IDs, timestamp ranges, source segment ranges, note paths.
+- `metadata.json`: source, workflow, harness, engine, status, and run metadata.
+- `structural-verification.json`: local artifact checks.
+- `polished.md`: merged final notes when all required chunks complete.
+
+Follow-up commands:
+
+```sh
+yt-scribe runs list
+yt-scribe runs open <run-name>
+yt-scribe runs rename <run-name> "Project vocabulary"
+yt-scribe run "<youtube-url>" --workflow deep --bundle-dir "<bundle-dir>" --resume
+yt-scribe ask <run-name> "What did the speaker say about retrieval?" --show-context
+yt-scribe ask <run-name> "What did the speaker say about retrieval?" --agent
+```
+
+Codex is the default harness. In deep mode it tries the Codex CSV fan-out engine
+when available, then falls back to managed per-chunk Codex calls. OpenCode deep
+mode tries a local-only server/session orchestration path with host `127.0.0.1`
+and no broad CORS, then falls back to managed per-chunk OpenCode calls. These
+paths all write the same bundle artifact contract.
+
+Deep mode does not transcribe audio, download media, or bypass unavailable,
+private, or disabled captions.
+
+</details>
+
 ## AI-Friendly JSON
 
 Put `--json` before the command:
@@ -430,6 +489,36 @@ Successful commands return:
   "fetch": {
     "video_id": "VIDEO_ID",
     "output_path": "/path/to/transcript.txt"
+  }
+}
+```
+
+A deep `run` includes workflow and follow-up details:
+
+```json
+{
+  "ok": true,
+  "run": {
+    "video_id": "VIDEO_ID",
+    "workflow": "deep",
+    "workflow_reason": "duration_at_or_above_threshold",
+    "duration_seconds": 5400,
+    "workflow_threshold_seconds": 2700,
+    "managed_run": {
+      "name": "example-talk-VIDEO_ID",
+      "video_id": "VIDEO_ID",
+      "status": "completed",
+      "bundle_path": "/home/user/.local/share/yt-scribe/runs/example-talk-VIDEO_ID"
+    },
+    "bundle": {
+      "dir": "/home/user/.local/share/yt-scribe/runs/example-talk-VIDEO_ID",
+      "metadata": "/home/user/.local/share/yt-scribe/runs/example-talk-VIDEO_ID/metadata.json"
+    },
+    "next_commands": [
+      "yt-scribe runs list",
+      "yt-scribe runs open example-talk-VIDEO_ID",
+      "yt-scribe ask example-talk-VIDEO_ID \"<question>\" --show-context"
+    ]
   }
 }
 ```

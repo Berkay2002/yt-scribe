@@ -22,3 +22,15 @@ temp file. The polishing prompt asks for the shared
 instructions. The CLI streams OpenCode JSON events as human progress and reads
 the final output from text events. It uses OpenCode's `--thinking` flag for
 reasoning event summaries. Prefer `--out` when the user expects a file.
+
+For long videos, `yt-scribe run` defaults to `--workflow auto` and selects deep
+mode at 45 minutes when duration metadata is available. Select OpenCode with
+`--agent-harness opencode` or config. OpenCode deep mode first tries
+local server/session orchestration using local-only defaults, then falls back to
+managed per-chunk OpenCode calls if server orchestration is unavailable or does
+not produce the expected bundle artifacts. It does not write project-local
+`.opencode/` config for a one-off deep run.
+
+After a deep run, use `yt-scribe --json runs list`, `yt-scribe --json runs open
+<run-name>`, and `yt-scribe --json ask <run-name> "<question>" --show-context`
+to inspect reusable artifacts before asking an agent.
