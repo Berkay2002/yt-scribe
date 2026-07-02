@@ -1,5 +1,8 @@
 import json
 
+import pytest
+
+import yt_scribe
 from yt_scribe import youtube
 
 
@@ -43,3 +46,16 @@ def test_youtube_module_extracts_playlist_video_ids(monkeypatch):
     assert youtube.fetch_playlist_video_ids("https://www.youtube.com/playlist?list=PLabc") == [
         "dQw4w9WgXcQ"
     ]
+
+
+def test_raw_caption_tracks_treats_invalid_caption_metadata_as_missing(monkeypatch):
+    monkeypatch.setattr(
+        youtube,
+        "fetch_watch_player_response",
+        lambda video_id, proxy_config=None: {"captions": None},
+    )
+
+    with pytest.raises(yt_scribe.CliError) as error:
+        youtube.fetch_raw_caption_tracks("dQw4w9WgXcQ")
+
+    assert error.value.code == "no_captions"

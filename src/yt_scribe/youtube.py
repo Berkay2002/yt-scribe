@@ -273,8 +273,14 @@ def fetch_raw_caption_tracks(
     proxy_config: GenericProxyConfig | None = None,
 ) -> list[CaptionTrack]:
     player = fetch_watch_player_response(video_id, proxy_config)
-    renderer = player.get("captions", {}).get("playerCaptionsTracklistRenderer", {})
-    raw_tracks = renderer.get("captionTracks") or []
+    captions = player.get("captions")
+    renderer = (
+        captions.get("playerCaptionsTracklistRenderer", {})
+        if isinstance(captions, dict)
+        else {}
+    )
+    raw_tracks = renderer.get("captionTracks") if isinstance(renderer, dict) else []
+    raw_tracks = raw_tracks if isinstance(raw_tracks, list) else []
     tracks = [
         CaptionTrack(
             name=caption_name(track),
@@ -284,6 +290,7 @@ def fetch_raw_caption_tracks(
             is_translatable=bool(track.get("isTranslatable")),
         )
         for track in raw_tracks
+        if isinstance(track, dict)
         if track.get("baseUrl")
     ]
     if not tracks:
