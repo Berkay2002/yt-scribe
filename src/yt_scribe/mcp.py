@@ -9,7 +9,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import yt_scribe
+from . import CliError, ProgressReporter
+from .cli import (
+    fetch_transcript_payload,
+    inspect_video_payload,
+    polish_transcript_text_payload,
+    run_youtube_polish_payload,
+)
+from .config import VERSION
+from .youtube import normalize_languages
 
 COMMAND_NAME = "yt-scribe-mcp"
 READ_ONLY_ENV_VAR = "YT_SCRIBE_MCP_READ_ONLY"
@@ -30,7 +38,7 @@ SERVER_INSTRUCTIONS = (
 )
 
 
-def error_payload(exc: yt_scribe.CliError) -> dict[str, Any]:
+def error_payload(exc: CliError) -> dict[str, Any]:
     return {
         "ok": False,
         "error": {
@@ -58,7 +66,7 @@ def server_info(enable_agent_tools: bool = True) -> dict[str, Any]:
     ]
     return {
         "package": "yt-scribe",
-        "version": yt_scribe.VERSION,
+        "version": VERSION,
         "default_transport": DEFAULT_TRANSPORT,
         "supported_tool_groups": tool_groups,
         "agent_tools_enabled": enable_agent_tools,
@@ -68,8 +76,8 @@ def server_info(enable_agent_tools: bool = True) -> dict[str, Any]:
 def inspect_youtube_captions(url: str) -> dict[str, Any]:
     """Inspect caption availability for a YouTube URL or video ID."""
     try:
-        return {"ok": True, "video": yt_scribe.inspect_video_payload(url)}
-    except yt_scribe.CliError as exc:
+        return {"ok": True, "video": inspect_video_payload(url)}
+    except CliError as exc:
         return error_payload(exc)
 
 
@@ -84,8 +92,8 @@ def fetch_youtube_transcript(
 ) -> dict[str, Any]:
     """Fetch a YouTube transcript without starting an agent harness."""
     try:
-        normalized_languages = yt_scribe.normalize_languages(languages, default=language)
-        fetch_payload, _rendered = yt_scribe.fetch_transcript_payload(
+        normalized_languages = normalize_languages(languages, default=language)
+        fetch_payload, _rendered = fetch_transcript_payload(
             url,
             normalized_languages,
             transcript_format,
@@ -95,7 +103,7 @@ def fetch_youtube_transcript(
             include_transcript=True,
         )
         return {"ok": True, "fetch": fetch_payload}
-    except yt_scribe.CliError as exc:
+    except CliError as exc:
         return error_payload(exc)
 
 
@@ -112,7 +120,7 @@ def agent_polish_transcript(
     """Polish transcript text with the configured Codex or OpenCode agent harness."""
     try:
         focus_items = [focus] if focus else None
-        payload, result = yt_scribe.polish_transcript_text_payload(
+        payload, result = polish_transcript_text_payload(
             transcript,
             style=style,
             focus=focus_items,
@@ -122,11 +130,11 @@ def agent_polish_transcript(
             model=model,
             max_chars=max_chars,
             out_path=None,
-            progress=yt_scribe.ProgressReporter(False),
+            progress=ProgressReporter(False),
         )
         payload["text"] = result["text"]
         return {"ok": True, "polish": payload}
-    except yt_scribe.CliError as exc:
+    except CliError as exc:
         return error_payload(exc)
 
 
@@ -146,9 +154,9 @@ def agent_fetch_and_polish_youtube(
 ) -> dict[str, Any]:
     """Fetch a YouTube transcript and polish it with Codex or OpenCode."""
     try:
-        normalized_languages = yt_scribe.normalize_languages(languages, default=language)
+        normalized_languages = normalize_languages(languages, default=language)
         focus_items = [focus] if focus else None
-        payload, result = yt_scribe.run_youtube_polish_payload(
+        payload, result = run_youtube_polish_payload(
             url,
             languages=normalized_languages,
             cache_dir=Path(cache_dir).expanduser().resolve() if cache_dir else None,
@@ -160,11 +168,11 @@ def agent_fetch_and_polish_youtube(
             agent_harness=agent_harness,
             model=model,
             max_chars=max_chars,
-            progress=yt_scribe.ProgressReporter(False),
+            progress=ProgressReporter(False),
         )
         payload["text"] = result["text"]
         return {"ok": True, "run": payload}
-    except yt_scribe.CliError as exc:
+    except CliError as exc:
         return error_payload(exc)
 
 
@@ -431,7 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {yt_scribe.VERSION}",
+        version=f"%(prog)s {VERSION}",
     )
     parser.add_argument(
         "--http",

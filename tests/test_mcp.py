@@ -10,6 +10,7 @@ import tomllib
 
 import yt_scribe as package
 import yt_scribe_mcp
+from yt_scribe import cli as cli_adapter
 from yt_scribe import youtube
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,7 +95,7 @@ def test_mcp_inspect_returns_caption_metadata_without_network():
         youtube.CaptionTrack("Swedish", "sv", "https://example.test/sv", kind="asr"),
     ]
 
-    with patch.object(package, "list_transcript_tracks", return_value=tracks):
+    with patch.object(cli_adapter, "list_transcript_tracks", return_value=tracks):
         payload = yt_scribe_mcp.inspect_youtube_captions("dQw4w9WgXcQ")
 
     assert payload["ok"] is True
@@ -125,7 +126,7 @@ def test_mcp_fetch_returns_rendered_transcript_and_metadata_without_network():
     }
 
     with patch.object(
-        package,
+        cli_adapter,
         "load_or_fetch_transcript",
         return_value=(transcript, {"status": "disabled", "path": None}),
     ) as load:
@@ -148,7 +149,7 @@ def test_mcp_fetch_returns_rendered_transcript_and_metadata_without_network():
 
 def test_mcp_fetch_preserves_transcript_error_code():
     with patch.object(
-        package,
+        cli_adapter,
         "load_or_fetch_transcript",
         side_effect=package.CliError("No caption tracks were found", "no_captions"),
     ):
@@ -176,7 +177,7 @@ def test_mcp_fetch_reports_progress_when_context_is_available():
             progress_events.append((progress, total, message))
 
     with patch.object(
-        package,
+        cli_adapter,
         "load_or_fetch_transcript",
         return_value=(transcript, {"status": "disabled", "path": None}),
     ):
@@ -207,7 +208,7 @@ def test_mcp_agent_tools_can_be_disabled_by_environment(monkeypatch):
 
 def test_mcp_agent_polish_uses_existing_harness_boundary():
     with patch.object(
-        package,
+        cli_adapter,
         "run_agent_polish",
         return_value={
             "output_path": None,
@@ -247,12 +248,12 @@ def test_mcp_agent_run_fetches_and_polishes_without_live_harness():
 
     with (
         patch.object(
-            package,
+            cli_adapter,
             "load_or_fetch_transcript",
             return_value=(transcript, {"status": "disabled", "path": None}),
         ) as load,
         patch.object(
-            package,
+            cli_adapter,
             "run_agent_polish",
             return_value={
                 "output_path": None,
