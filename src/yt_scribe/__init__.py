@@ -5162,7 +5162,9 @@ _transcripts = importlib.import_module(".transcripts", __name__)
 _youtube = importlib.import_module(".youtube", __name__)
 _batch = importlib.import_module(".batch", __name__)
 _config = importlib.import_module(".config", __name__)
+_runs = importlib.import_module(".runs", __name__)
 _setup = importlib.import_module(".setup", __name__)
+_verify = importlib.import_module(".verify", __name__)
 
 _YOUTUBE_COMPAT_NAMES = (
     "http_get",
@@ -5249,6 +5251,53 @@ _BATCH_COMPAT_NAMES = (
     "read_batch_urls",
     "expand_batch_items",
 )
+_VERIFY_COMPAT_NAMES = (
+    "normalize_verification_text",
+    "strip_markdown_marker",
+    "split_polished_claim_records",
+    "split_polished_claims",
+    "verification_terms",
+    "risky_verification_terms",
+    "transcript_entries_from_text",
+    "transcript_entries_from_segments",
+    "load_verification_transcript",
+    "find_transcript_anchor",
+    "verify_claim",
+    "verify_polished_output",
+    "verify_polished_file",
+    "render_verification",
+)
+_RUNS_COMPAT_NAMES = (
+    "bundle_paths",
+    "write_bundle_metadata",
+    "write_json_file",
+    "write_deep_bundle_plan",
+    "verify_deep_bundle_structure",
+    "read_json_file",
+    "update_deep_engine_metadata",
+    "data_dir",
+    "managed_runs_dir",
+    "run_registry_path",
+    "empty_run_registry",
+    "load_run_registry",
+    "save_run_registry",
+    "utc_timestamp",
+    "slugify_run_name",
+    "unique_run_name",
+    "run_record_for_deep_workflow",
+    "update_run_record",
+    "matching_runs",
+    "resolve_run_selector",
+    "rename_run",
+    "retrieval_tokens",
+    "retrieval_score",
+    "split_markdown_blocks",
+    "transcript_timestamp",
+    "retrieve_run_context",
+    "render_ask_context",
+    "ask_agent_instruction",
+    "deep_next_commands",
+)
 _YOUTUBE_COMPAT_ORIGINALS = {name: getattr(_youtube, name) for name in _YOUTUBE_COMPAT_NAMES}
 _TRANSCRIPT_COMPAT_ORIGINALS = {
     name: getattr(_transcripts, name) for name in _TRANSCRIPT_COMPAT_NAMES
@@ -5256,6 +5305,8 @@ _TRANSCRIPT_COMPAT_ORIGINALS = {
 _CONFIG_COMPAT_ORIGINALS = {name: getattr(_config, name) for name in _CONFIG_COMPAT_NAMES}
 _SETUP_COMPAT_ORIGINALS = {name: getattr(_setup, name) for name in _SETUP_COMPAT_NAMES}
 _BATCH_COMPAT_ORIGINALS = {name: getattr(_batch, name) for name in _BATCH_COMPAT_NAMES}
+_VERIFY_COMPAT_ORIGINALS = {name: getattr(_verify, name) for name in _VERIFY_COMPAT_NAMES}
+_RUNS_COMPAT_ORIGINALS = {name: getattr(_runs, name) for name in _RUNS_COMPAT_NAMES}
 _TRANSCRIPT_DEPENDENCY_ORIGINALS = {
     "extract_video_id": _YOUTUBE_COMPAT_ORIGINALS["extract_video_id"],
     "fetch_transcript": _YOUTUBE_COMPAT_ORIGINALS["fetch_transcript"],
@@ -5270,6 +5321,15 @@ _BATCH_DEPENDENCY_ORIGINALS = {
     "canonical_watch_url": _YOUTUBE_COMPAT_ORIGINALS["canonical_watch_url"],
     "fetch_playlist_video_ids": _YOUTUBE_COMPAT_ORIGINALS["fetch_playlist_video_ids"],
     "playlist_id_from_url": _YOUTUBE_COMPAT_ORIGINALS["playlist_id_from_url"],
+}
+_VERIFY_DEPENDENCY_ORIGINALS = {
+    "timestamp_anchor": _TRANSCRIPT_COMPAT_ORIGINALS["timestamp_anchor"],
+}
+_RUNS_DEPENDENCY_ORIGINALS = {
+    "plan_deep_chunks": _TRANSCRIPT_COMPAT_ORIGINALS["plan_deep_chunks"],
+    "render_timestamped_transcript": _TRANSCRIPT_COMPAT_ORIGINALS[
+        "render_timestamped_transcript"
+    ],
 }
 
 
@@ -5318,6 +5378,26 @@ def _sync_batch_compat_globals() -> None:
     for name, original in _BATCH_DEPENDENCY_ORIGINALS.items():
         value = globals().get(name, original)
         setattr(_batch, name, original if _is_compat_wrapper(value) else value)
+
+
+def _sync_verify_compat_globals() -> None:
+    _sync_transcript_compat_globals()
+    for name, original in _VERIFY_COMPAT_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_verify, name, original if _is_compat_wrapper(value) else value)
+    for name, original in _VERIFY_DEPENDENCY_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_verify, name, original if _is_compat_wrapper(value) else value)
+
+
+def _sync_runs_compat_globals() -> None:
+    _sync_transcript_compat_globals()
+    for name, original in _RUNS_COMPAT_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_runs, name, original if _is_compat_wrapper(value) else value)
+    for name, original in _RUNS_DEPENDENCY_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_runs, name, original if _is_compat_wrapper(value) else value)
 
 
 def _youtube_compat_function(name: str) -> Callable[..., Any]:
@@ -5385,6 +5465,32 @@ def _batch_compat_function(name: str) -> Callable[..., Any]:
     return wrapper
 
 
+def _verify_compat_function(name: str) -> Callable[..., Any]:
+    original = _VERIFY_COMPAT_ORIGINALS[name]
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        _sync_verify_compat_globals()
+        return original(*args, **kwargs)
+
+    wrapper.__name__ = name
+    wrapper.__doc__ = original.__doc__
+    wrapper._yt_scribe_compat_wrapper = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+def _runs_compat_function(name: str) -> Callable[..., Any]:
+    original = _RUNS_COMPAT_ORIGINALS[name]
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        _sync_runs_compat_globals()
+        return original(*args, **kwargs)
+
+    wrapper.__name__ = name
+    wrapper.__doc__ = original.__doc__
+    wrapper._yt_scribe_compat_wrapper = True  # type: ignore[attr-defined]
+    return wrapper
+
+
 for _name in _YOUTUBE_COMPAT_NAMES:
     globals()[_name] = _youtube_compat_function(_name)
 
@@ -5399,6 +5505,12 @@ for _name in _CONFIG_COMPAT_NAMES:
 
 for _name in _BATCH_COMPAT_NAMES:
     globals()[_name] = _batch_compat_function(_name)
+
+for _name in _VERIFY_COMPAT_NAMES:
+    globals()[_name] = _verify_compat_function(_name)
+
+for _name in _RUNS_COMPAT_NAMES:
+    globals()[_name] = _runs_compat_function(_name)
 
 
 def main(argv: list[str] | None = None) -> int:
