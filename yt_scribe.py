@@ -18,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -232,8 +233,9 @@ yt-scribe --json polish transcript.txt --style summary --out summary.md
 With Codex, the CLI invokes `codex exec` in read-only, ephemeral mode and passes
 the transcript through stdin. The polishing prompt asks for the
 `yt-scribe-transcript-polisher` skill from `.agents/skills` and its Codex
-instructions. The CLI writes final Codex output through `--output-last-message`,
-so prefer `--out` when the user expects a file.
+instructions. The CLI streams Codex JSON events as human progress and writes
+final Codex output through `--output-last-message`, so prefer `--out` when the
+user expects a file.
 """,
     ".agents/skills/yt-scribe/harness/opencode.md": """# OpenCode Harness
 
@@ -256,7 +258,9 @@ yt-scribe config set default-agent-harness opencode
 With OpenCode, the CLI invokes `opencode run` and attaches the transcript as a
 temp file. The polishing prompt asks for the shared
 `yt-scribe-transcript-polisher` skill from `.agents/skills` and its OpenCode
-instructions. Prefer `--out` when the user expects a file.
+instructions. The CLI streams OpenCode JSON events as human progress and reads
+the final output from text events. It uses OpenCode's `--thinking` flag for
+reasoning event summaries. Prefer `--out` when the user expects a file.
 """,
     ".agents/skills/yt-scribe/agents/openai.yaml": """interface:
   display_name: "YT Scribe"
@@ -2105,6 +2109,177 @@ def lifecycle_steps() -> list[dict[str, str]]:
     ]
 
 
+def append_tail(buffer: list[str], text: str, limit: int) -> None:
+    buffer.append(text)
+    joined = "".join(buffer)
+    if len(joined) > limit:
+        buffer[:] = [joined[-limit:]]
+
+
+def drain_stream_tail(stream: Any, buffer: list[str], limit: int) -> None:
+    if stream is None:
+        return
+    for line in stream:
+        append_tail(buffer, line, limit)
+
+
+def run_jsonl_process(
+    command: list[str],
+    progress: ProgressReporter | None,
+    progress_message: Callable[[dict[str, Any]], str | None],
+    final_text: Callable[[dict[str, Any]], str | None],
+    stdin_text: str | None = None,
+) -> dict[str, Any]:
+    stdout_tail: list[str] = []
+    stderr_tail: list[str] = []
+    text_parts: list[str] = []
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE if stdin_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        bufsize=1,
+    )
+    stderr_thread = threading.Thread(
+        target=drain_stream_tail,
+        args=(process.stderr, stderr_tail, 4000),
+        daemon=True,
+    )
+    stderr_thread.start()
+
+    try:
+        if stdin_text is not None and process.stdin:
+            try:
+                process.stdin.write(stdin_text)
+                process.stdin.close()
+            except OSError:
+                pass
+
+        if process.stdout:
+            for line in process.stdout:
+                append_tail(stdout_tail, line, 4000)
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if progress:
+                    message = progress_message(event)
+                    if message:
+                        progress.message(message)
+                text = final_text(event)
+                if text:
+                    text_parts.append(text)
+        returncode = process.wait()
+    finally:
+        stderr_thread.join(timeout=0.5)
+
+    return {
+        "returncode": returncode,
+        "stdout_tail": "".join(stdout_tail),
+        "stderr_tail": "".join(stderr_tail),
+        "text": "".join(text_parts),
+    }
+
+
+def codex_item_progress_message(event_type: str, item: dict[str, Any]) -> str | None:
+    item_type = item.get("type")
+    action = "started" if event_type == "item.started" else "completed"
+    if item_type == "reasoning":
+        return f"Codex {action} reasoning"
+    if item_type == "command_execution":
+        command = str(item.get("command") or "").strip()
+        return f"Codex {action} command: {command}" if command else f"Codex {action} command"
+    if item_type == "agent_message":
+        text = str(item.get("text") or "")
+        if event_type == "item.completed":
+            return f"Codex completed final message ({len(text)} chars)"
+        return "Codex started final message"
+    if item_type == "mcp_tool_call":
+        name = str(item.get("name") or item.get("tool_name") or "").strip()
+        return f"Codex {action} MCP tool: {name}" if name else f"Codex {action} MCP tool"
+    if item_type == "web_search_call":
+        return f"Codex {action} web search"
+    if item_type == "file_change":
+        return f"Codex {action} file change"
+    if item_type == "plan_update":
+        return f"Codex {action} plan update"
+    if isinstance(item_type, str) and item_type:
+        return f"Codex {action} {item_type.replace('_', ' ')}"
+    return None
+
+
+def codex_progress_message(event: dict[str, Any]) -> str | None:
+    event_type = event.get("type")
+    if event_type == "thread.started":
+        return "Codex thread started"
+    if event_type == "turn.started":
+        return "Codex turn started"
+    if event_type == "turn.failed":
+        return "Codex turn failed"
+    if event_type == "turn.completed":
+        usage = event.get("usage")
+        if isinstance(usage, dict) and isinstance(usage.get("output_tokens"), int):
+            return f"Codex turn completed ({usage['output_tokens']} output tokens)"
+        return "Codex turn completed"
+    if event_type == "error":
+        message = event.get("message") or event.get("error") or "unknown error"
+        return f"Codex error: {message}"
+    if event_type in {"item.started", "item.completed"}:
+        item = event.get("item")
+        if isinstance(item, dict):
+            return codex_item_progress_message(str(event_type), item)
+    return None
+
+
+def codex_final_text(event: dict[str, Any]) -> str | None:
+    if event.get("type") != "item.completed":
+        return None
+    item = event.get("item")
+    if not isinstance(item, dict) or item.get("type") != "agent_message":
+        return None
+    text = item.get("text")
+    return text if isinstance(text, str) else None
+
+
+def opencode_progress_message(event: dict[str, Any]) -> str | None:
+    event_type = event.get("type")
+    part = event.get("part")
+    if event_type == "step_start":
+        return "OpenCode started step"
+    if event_type == "step_finish":
+        return "OpenCode completed step"
+    if event_type == "tool_use" and isinstance(part, dict):
+        name = str(part.get("tool") or part.get("name") or "tool")
+        state = part.get("state")
+        status = state.get("status") if isinstance(state, dict) else None
+        action = "completed" if status == "completed" else "updated"
+        return f"OpenCode {action} tool: {name}"
+    if event_type == "reasoning" and isinstance(part, dict):
+        text = str(part.get("text") or "")
+        return f"OpenCode completed reasoning ({len(text)} chars)"
+    if event_type == "text" and isinstance(part, dict):
+        text = str(part.get("text") or "")
+        return f"OpenCode completed text output ({len(text)} chars)"
+    if event_type == "error":
+        message = event.get("error") or "unknown error"
+        return f"OpenCode error: {message}"
+    return None
+
+
+def opencode_final_text(event: dict[str, Any]) -> str | None:
+    if event.get("type") != "text":
+        return None
+    part = event.get("part")
+    if not isinstance(part, dict):
+        return None
+    text = part.get("text")
+    return text if isinstance(text, str) else None
+
+
 def run_codex_polish(
     transcript_text: str,
     instruction: str,
@@ -2126,6 +2301,7 @@ def run_codex_polish(
             "--skip-git-repo-check",
             "--sandbox",
             "read-only",
+            "--json",
             "--output-last-message",
             str(final_path),
         )
@@ -2137,41 +2313,41 @@ def run_codex_polish(
 
         if progress:
             with progress.wait("Running Codex polisher"):
-                result = subprocess.run(
+                result = run_jsonl_process(
                     command,
-                    input=transcript_text,
-                    text=True,
-                    encoding="utf-8",
-                    capture_output=True,
-                    check=False,
+                    progress,
+                    codex_progress_message,
+                    codex_final_text,
+                    stdin_text=transcript_text,
                 )
         else:
-            result = subprocess.run(
+            result = run_jsonl_process(
                 command,
-                input=transcript_text,
-                text=True,
-                encoding="utf-8",
-                capture_output=True,
-                check=False,
+                progress,
+                codex_progress_message,
+                codex_final_text,
+                stdin_text=transcript_text,
             )
-        if result.returncode != 0:
+        if result["returncode"] != 0:
             raise CliError(
                 "codex exec failed",
                 "codex_exec_failed",
                 {
-                    "returncode": result.returncode,
-                    "stderr_tail": result.stderr[-4000:],
+                    "returncode": result["returncode"],
+                    "stderr_tail": result["stderr_tail"],
+                    "stdout_tail": result["stdout_tail"],
                 },
             )
 
-        polished = final_path.read_text(encoding="utf-8") if final_path.exists() else result.stdout
+        polished = final_path.read_text(encoding="utf-8") if final_path.exists() else result["text"]
         polished = polished.strip() + "\n"
         written = write_text(out_path, polished)
         return {
             "output_path": written,
             "chars": len(polished),
             "harness": "codex",
-            "codex_stderr_tail": result.stderr[-2000:],
+            "codex_stderr_tail": result["stderr_tail"][-2000:],
+            "codex_stdout_tail": result["stdout_tail"][-2000:],
             "text": polished,
         }
 
@@ -2199,6 +2375,7 @@ def run_opencode_polish(
             str(transcript_path),
             "--format",
             "json",
+            "--thinking",
         )
         if cwd:
             command.extend(["--dir", str(Path(cwd).expanduser().resolve())])
@@ -2207,38 +2384,39 @@ def run_opencode_polish(
 
         if progress:
             with progress.wait("Running OpenCode polisher"):
-                result = subprocess.run(
+                result = run_jsonl_process(
                     command,
-                    text=True,
-                    encoding="utf-8",
-                    capture_output=True,
-                    check=False,
+                    progress,
+                    opencode_progress_message,
+                    opencode_final_text,
                 )
         else:
-            result = subprocess.run(
+            result = run_jsonl_process(
                 command,
-                text=True,
-                encoding="utf-8",
-                capture_output=True,
-                check=False,
+                progress,
+                opencode_progress_message,
+                opencode_final_text,
             )
-        if result.returncode != 0:
+        if result["returncode"] != 0:
             raise CliError(
                 "opencode run failed",
                 "opencode_run_failed",
                 {
-                    "returncode": result.returncode,
-                    "stderr_tail": result.stderr[-4000:],
+                    "returncode": result["returncode"],
+                    "stderr_tail": result["stderr_tail"],
+                    "stdout_tail": result["stdout_tail"],
                 },
             )
 
-        polished = parse_opencode_run_output(result.stdout).strip() + "\n"
+        polished_text = result["text"] or parse_opencode_run_output(result["stdout_tail"])
+        polished = polished_text.strip() + "\n"
         written = write_text(out_path, polished)
         return {
             "output_path": written,
             "chars": len(polished),
             "harness": "opencode",
-            "opencode_stderr_tail": result.stderr[-2000:],
+            "opencode_stderr_tail": result["stderr_tail"][-2000:],
+            "opencode_stdout_tail": result["stdout_tail"][-2000:],
             "text": polished,
         }
 

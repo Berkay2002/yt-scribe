@@ -3,7 +3,6 @@ import contextlib
 import io
 import json
 import os
-import subprocess
 import tempfile
 import unittest
 import urllib.error
@@ -408,22 +407,39 @@ class YtScribeTests(unittest.TestCase):
     def test_opencode_polish_uses_run_command_with_attached_transcript(self):
         calls = []
 
-        def fake_run(command, **kwargs):
-            calls.append((command, kwargs))
-            transcript_path = Path(command[command.index("--file") + 1])
-            self.assertEqual(transcript_path.read_text(encoding="utf-8"), "raw transcript")
-            stdout = "\n".join(
-                [
-                    json.dumps({"type": "step_start"}),
-                    json.dumps({"type": "text", "part": {"text": "polished text"}}),
-                    json.dumps({"type": "step_finish"}),
-                ]
-            )
-            return subprocess.CompletedProcess(command, 0, stdout, "")
+        class FakePipe:
+            def __init__(self, lines: list[str] | None = None):
+                self.lines = lines or []
 
+            def __iter__(self):
+                return iter(self.lines)
+
+        class FakePopen:
+            def __init__(self, command, **kwargs):
+                calls.append((command, kwargs))
+                transcript_path = Path(command[command.index("--file") + 1])
+                self_outer.assertEqual(
+                    transcript_path.read_text(encoding="utf-8"), "raw transcript"
+                )
+                self.stdin = None
+                self.stdout = FakePipe(
+                    [
+                        json.dumps({"type": "step_start"}) + "\n",
+                        json.dumps({"type": "text", "part": {"text": "polished text"}})
+                        + "\n",
+                        json.dumps({"type": "step_finish"}) + "\n",
+                    ]
+                )
+                self.stderr = FakePipe()
+                self.returncode = 0
+
+            def wait(self) -> int:
+                return self.returncode
+
+        self_outer = self
         with (
             patch.object(yt_scribe, "command_path", return_value="opencode"),
-            patch.object(yt_scribe.subprocess, "run", side_effect=fake_run),
+            patch.object(yt_scribe.subprocess, "Popen", FakePopen),
         ):
             result = yt_scribe.run_agent_polish(
                 "raw transcript",
@@ -443,8 +459,182 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(calls[0][0][2], "Polish the transcript.")
         self.assertIn("--dir", calls[0][0])
         self.assertIn("--format", calls[0][0])
+        self.assertIn("--thinking", calls[0][0])
         self.assertNotIn("--agent", calls[0][0])
         self.assertIn("--model", calls[0][0])
+
+    def test_opencode_polish_streams_json_events_to_progress(self):
+        calls = []
+
+        class FakePipe:
+            def __init__(self, lines: list[str] | None = None):
+                self.lines = lines or []
+                self.written = ""
+                self.closed = False
+
+            def write(self, text: str) -> None:
+                self.written += text
+
+            def close(self) -> None:
+                self.closed = True
+
+            def __iter__(self):
+                return iter(self.lines)
+
+        class FakePopen:
+            def __init__(self, command, **kwargs):
+                calls.append((command, kwargs))
+                self.stdin = FakePipe()
+                self.stdout = FakePipe(
+                    [
+                        json.dumps({"type": "step_start", "part": {"type": "step-start"}})
+                        + "\n",
+                        json.dumps(
+                            {
+                                "type": "tool_use",
+                                "part": {
+                                    "type": "tool",
+                                    "tool": "read",
+                                    "state": {"status": "completed"},
+                                },
+                            }
+                        )
+                        + "\n",
+                        json.dumps(
+                            {
+                                "type": "reasoning",
+                                "part": {"type": "reasoning", "text": "checking transcript"},
+                            }
+                        )
+                        + "\n",
+                        json.dumps(
+                            {
+                                "type": "text",
+                                "part": {"type": "text", "text": "polished text"},
+                            }
+                        )
+                        + "\n",
+                    ]
+                )
+                self.stderr = FakePipe()
+                self.returncode = 0
+
+            def wait(self) -> int:
+                return self.returncode
+
+        stderr = io.StringIO()
+        with (
+            patch.object(yt_scribe, "command_path", return_value="opencode"),
+            patch.object(yt_scribe.subprocess, "Popen", FakePopen),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = yt_scribe.run_agent_polish(
+                "raw transcript",
+                "Polish the transcript.",
+                None,
+                None,
+                None,
+                "opencode",
+                yt_scribe.ProgressReporter(True),
+            )
+
+        self.assertEqual(result["text"], "polished text\n")
+        self.assertIn("--format", calls[0][0])
+        self.assertIn("json", calls[0][0])
+        self.assertIn("--thinking", calls[0][0])
+        progress = stderr.getvalue()
+        self.assertIn("OpenCode started step", progress)
+        self.assertIn("OpenCode completed tool: read", progress)
+        self.assertIn("OpenCode completed reasoning", progress)
+        self.assertIn("OpenCode completed text output (13 chars)", progress)
+
+    def test_codex_polish_streams_json_events_to_progress(self):
+        calls = []
+
+        class FakePipe:
+            def __init__(self, lines: list[str] | None = None):
+                self.lines = lines or []
+                self.written = ""
+                self.closed = False
+
+            def write(self, text: str) -> None:
+                self.written += text
+
+            def close(self) -> None:
+                self.closed = True
+
+            def __iter__(self):
+                return iter(self.lines)
+
+        class FakePopen:
+            def __init__(self, command, **kwargs):
+                calls.append((command, kwargs))
+                final_path = Path(command[command.index("--output-last-message") + 1])
+                final_path.write_text("polished text\n", encoding="utf-8")
+                self.stdin = FakePipe()
+                self.stdout = FakePipe(
+                    [
+                        json.dumps({"type": "thread.started", "thread_id": "thread-1"}) + "\n",
+                        json.dumps(
+                            {
+                                "type": "item.started",
+                                "item": {"id": "item-1", "type": "reasoning"},
+                            }
+                        )
+                        + "\n",
+                        json.dumps(
+                            {
+                                "type": "item.started",
+                                "item": {
+                                    "id": "item-2",
+                                    "type": "command_execution",
+                                    "command": "python -m pytest",
+                                },
+                            }
+                        )
+                        + "\n",
+                        json.dumps(
+                            {
+                                "type": "item.completed",
+                                "item": {
+                                    "id": "item-3",
+                                    "type": "agent_message",
+                                    "text": "polished text",
+                                },
+                            }
+                        )
+                        + "\n",
+                    ]
+                )
+                self.stderr = FakePipe()
+                self.returncode = 0
+
+            def wait(self) -> int:
+                return self.returncode
+
+        stderr = io.StringIO()
+        with (
+            patch.object(yt_scribe, "command_path", return_value="codex"),
+            patch.object(yt_scribe.subprocess, "Popen", FakePopen),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = yt_scribe.run_agent_polish(
+                "raw transcript",
+                "Polish the transcript.",
+                None,
+                None,
+                None,
+                "codex",
+                yt_scribe.ProgressReporter(True),
+            )
+
+        self.assertEqual(result["text"], "polished text\n")
+        self.assertIn("--json", calls[0][0])
+        progress = stderr.getvalue()
+        self.assertIn("Codex thread started", progress)
+        self.assertIn("Codex started reasoning", progress)
+        self.assertIn("Codex started command: python -m pytest", progress)
+        self.assertIn("Codex completed final message (13 chars)", progress)
 
     def test_doctor_reports_codex_and_opencode_harnesses(self):
         paths = {"codex": "C:\\bin\\codex.exe", "opencode": None}

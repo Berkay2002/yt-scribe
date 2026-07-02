@@ -657,18 +657,18 @@ Codex is the built-in default. `polish` and `run` call:
 <summary>Harness command details and skill layout</summary>
 
 ```text
-codex exec --ephemeral --skip-git-repo-check --sandbox read-only --output-last-message <temp-file> "<instruction>"
+codex exec --ephemeral --skip-git-repo-check --sandbox read-only --json --output-last-message <temp-file> "<instruction>"
 ```
 
-The transcript is passed through stdin. Codex progress stays separate from the final output, and the final message is read from the file written by `--output-last-message`.
+The transcript is passed through stdin. Codex JSON events are streamed to stderr as human progress, while the final message is read from the file written by `--output-last-message`.
 
 OpenCode is available when `opencode` is on PATH and selected with `--agent-harness opencode` or config. `yt-scribe` calls:
 
 ```text
-opencode run "<instruction>" --file <temp-transcript-file> --format json
+opencode run "<instruction>" --file <temp-transcript-file> --format json --thinking
 ```
 
-The final text is read from OpenCode JSON events. Run `yt-scribe doctor` to check whether `codex` and `opencode` are available and whether their auth commands report usable local configuration.
+OpenCode JSON events are streamed to stderr as human progress, including reasoning event summaries when OpenCode emits them. Final text is read from the text events. Run `yt-scribe doctor` to check whether `codex` and `opencode` are available and whether their auth commands report usable local configuration.
 
 For the default prompt, `--style` selects the output mode and `--focus` appends
 run-specific instructions. JSON output includes `instruction_mode` and

@@ -19,4 +19,6 @@ yt-scribe config set default-agent-harness opencode
 With OpenCode, the CLI invokes `opencode run` and attaches the transcript as a
 temp file. The polishing prompt asks for the shared
 `yt-scribe-transcript-polisher` skill from `.agents/skills` and its OpenCode
-instructions. Prefer `--out` when the user expects a file.
+instructions. The CLI streams OpenCode JSON events as human progress and reads
+the final output from text events. It uses OpenCode's `--thinking` flag for
+reasoning event summaries. Prefer `--out` when the user expects a file.
