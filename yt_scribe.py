@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -27,4 +28,4 @@ def _load_package() -> ModuleType:
 _package = _load_package()
 
 if __name__ == "__main__":
-    raise SystemExit(_package.main())
+    raise SystemExit(importlib.import_module("yt_scribe.cli").main())
