@@ -3,9 +3,14 @@
   "version": "0.1.0",
   "description": "Use yt-scribe to fetch YouTube transcripts and polish them with Codex or OpenCode.",
   "author": {
-    "name": "Berkay"
+    "name": "Berkay",
+    "url": "https://github.com/Berkay2002"
   },
-  "skills": "./.agents/skills/",
+  "homepage": "https://github.com/Berkay2002/yt-scribe",
+  "repository": "https://github.com/Berkay2002/yt-scribe",
+  "license": "MIT",
+  "keywords": ["youtube", "transcript", "codex", "opencode", "notes"],
+  "skills": "./skills/",
   "interface": {
     "displayName": "YT Scribe",
     "shortDescription": "Fetch and polish YouTube transcripts.",
@@ -13,6 +18,7 @@
     "developerName": "Berkay",
     "category": "Productivity",
     "capabilities": ["Read", "Interactive"],
+    "websiteURL": "https://github.com/Berkay2002/yt-scribe",
     "defaultPrompt": [
       "Turn this YouTube link into notes.",
       "Fetch this video's transcript.",

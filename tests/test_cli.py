@@ -34,7 +34,37 @@ def test_polish_help_exposes_agent_harness_selection():
     assert result.returncode == 0
     assert "--agent-harness" in result.stdout
     assert "--focus" in result.stdout
+    assert "--timestamps" in result.stdout
     assert "opencode" in result.stdout
+
+
+def test_inspect_help_exposes_brief_mode():
+    result = run_cli("inspect", "--help")
+
+    assert result.returncode == 0
+    assert "--brief" in result.stdout
+
+
+def test_verify_help_exposes_transcript_input():
+    result = run_cli("verify", "--help")
+
+    assert result.returncode == 0
+    assert "--transcript" in result.stdout
+
+
+def test_run_help_exposes_chunking_option():
+    result = run_cli("run", "--help")
+
+    assert result.returncode == 0
+    assert "--chunk-chars" in result.stdout
+    assert "--bundle-dir" in result.stdout
+
+
+def test_init_project_help_exposes_project_directory():
+    result = run_cli("init-project", "--help")
+
+    assert result.returncode == 0
+    assert "--dir" in result.stdout
 
 
 def test_lifecycle_prints_ordered_public_commands():
@@ -86,6 +116,39 @@ def test_config_command_persists_default_agent_harness(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["config"]["default_agent_harness"] == "opencode"
     assert payload["config"]["effective_agent_harness"] == "opencode"
+
+
+def test_config_profile_set_and_get(tmp_path):
+    env = os.environ.copy()
+    env["YT_SCRIBE_CONFIG"] = str(tmp_path / "config.json")
+
+    result = run_cli(
+        "--json",
+        "config",
+        "profile",
+        "set",
+        "research",
+        "--style",
+        "summary",
+        "--langs",
+        "en,sv",
+        "--template",
+        "lecture",
+        "--timestamps",
+        env=env,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["config"]["profiles"]["research"]["style"] == "summary"
+    assert payload["config"]["profiles"]["research"]["langs"] == ["en", "sv"]
+
+    result = run_cli("--json", "config", "profile", "get", "research", env=env)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["profile"]["name"] == "research"
+    assert payload["profile"]["values"]["template"] == "lecture"
 
 
 def test_install_skills_writes_global_skill_files(tmp_path):

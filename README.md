@@ -365,24 +365,30 @@ There are two skills:
 - `yt-scribe`: teaches an agent how to use the CLI correctly.
 - `yt-scribe-transcript-polisher`: guides the agent started by the CLI to polish the fetched transcript.
 
-Both Codex and OpenCode use the shared `.agents/skills` tree. Each skill keeps Codex and OpenCode notes in separate files, so each tool sees only the details it needs.
+The Codex plugin uses the root `skills/` tree. The CLI setup flow also keeps a
+shared `.agents/skills` tree for installing these skills globally from the
+command line. Each skill keeps Codex and OpenCode notes in separate files, so
+each tool sees only the details it needs.
 
 ## Plugin Skills
 
-This repository contains shared agent skills:
+This repository contains one Codex plugin skill:
 
-- `.agents/skills/yt-scribe`: skill for using the CLI.
-- `.agents/skills/yt-scribe/harness/codex.md`: Codex-specific CLI instructions.
-- `.agents/skills/yt-scribe/harness/opencode.md`: OpenCode-specific CLI instructions.
-- `.agents/skills/yt-scribe-transcript-polisher`: skill for transcript rewriting.
-- `.agents/skills/yt-scribe-transcript-polisher/harness/codex.md`: Codex stdin polishing instructions.
-- `.agents/skills/yt-scribe-transcript-polisher/harness/opencode.md`: OpenCode attached-file polishing instructions.
+- `skills/yt-scribe`: skill for using the CLI.
+- `skills/yt-scribe/harness/codex.md`: Codex-specific CLI instructions.
+- `skills/yt-scribe/harness/opencode.md`: OpenCode-specific CLI instructions.
 
-The split matters. One skill explains how to run the CLI correctly. The transcript-polisher skill is only for the agent started by the CLI after the transcript has already been fetched.
+The plugin skill explains how to run the CLI correctly. The transcript-polisher
+skill is internal support for the agent started by the CLI after the transcript
+has already been fetched, so it is not exposed through the plugin.
 
 When the CLI is installed globally, project-local `.agents` folders are not automatically available in other projects. Run `yt-scribe setup` to install the skill files globally.
 
-The plugin manifest lives in `.codex-plugin/` and points at `.agents/skills/`.
+The plugin manifest lives in `.codex-plugin/` and points at `skills/`.
+
+For Codex plugin installation, this repo includes `.agents/plugins/marketplace.json`.
+The marketplace entry points at `https://github.com/Berkay2002/yt-scribe.git`
+because the plugin root is the repository root.
 
 ## Notes
 

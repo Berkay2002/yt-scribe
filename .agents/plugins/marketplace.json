@@ -1,0 +1,21 @@
+{
+  "name": "yt-scribe",
+  "interface": {
+    "displayName": "YT Scribe"
+  },
+  "plugins": [
+    {
+      "name": "yt-scribe",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/Berkay2002/yt-scribe.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

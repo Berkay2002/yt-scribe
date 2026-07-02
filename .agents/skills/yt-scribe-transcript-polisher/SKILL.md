@@ -17,7 +17,10 @@ Read exactly one harness file based on how the transcript was provided:
 - Return only the requested polished transcript output.
 - Preserve the speaker's meaning, sequence, and concrete claims.
 - Honor custom user instructions passed by `yt-scribe`. When they conflict with the selected output mode, the custom instructions win unless they would require adding unsupported facts.
-- Remove caption artifacts, repeated fragments, filler, obvious false starts, and timestamp residue.
+- Remove caption artifacts, repeated fragments, filler, obvious false starts,
+  and timestamp residue unless timestamp grounding was requested.
+- When timestamp grounding is requested, preserve useful timestamp anchors from
+  the provided transcript near important claims. Do not invent timestamps.
 - Do not add facts, examples, citations, links, or claims that are not in the transcript.
 - Do not mention that you used a skill, a harness, stdin, an attached file, or a cleaning process.
 - If the transcript is empty or unusable, say that the transcript content is missing or unusable.

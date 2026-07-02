@@ -1,0 +1,4 @@
+interface:
+  display_name: "YT Scribe"
+  short_description: "Use yt-scribe to fetch and polish YouTube transcripts."
+  default_prompt: "Turn this YouTube link into clean notes."

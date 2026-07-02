@@ -66,6 +66,26 @@ STYLE_INSTRUCTIONS = {
         "facts that are not in the transcript."
     ),
 }
+TIMESTAMP_GROUNDING_INSTRUCTION = (
+    "Timestamp grounding is requested. When the transcript includes timestamp anchors "
+    "such as [01:23], preserve useful anchors in the polished output so important "
+    "claims can be traced back to the transcript. Do not invent timestamps, and do "
+    "not add timestamp anchors for claims that are not supported by nearby transcript text."
+)
+TEMPLATE_INSTRUCTIONS = {
+    "lecture": (
+        "Use a lecture notes structure with concise section headings, key concepts, "
+        "definitions, examples, and open questions when they are present in the transcript."
+    ),
+    "research": (
+        "Use a research notes structure with claims, evidence, methods, limitations, "
+        "and follow-up questions when they are present in the transcript."
+    ),
+    "meeting": (
+        "Use a meeting-style structure with decisions, risks, action items, owners, "
+        "and deadlines only when they are present in the transcript."
+    ),
+}
 INNER_POLISHER_SKILL = "yt-scribe-transcript-polisher"
 HARNESS_INSTRUCTIONS = {
     "codex": "harness/codex.md",
@@ -128,6 +148,7 @@ For a new YouTube link:
 
 ```sh
 yt-scribe --json inspect "<youtube-url>"
+yt-scribe --json inspect "<youtube-url>" --brief
 yt-scribe --json fetch "<youtube-url>" --lang en --out transcript.txt
 yt-scribe --json polish transcript.txt --style notes --out notes.md
 yt-scribe --json polish transcript.txt --focus "Focus on decisions and risks" --out notes.md
@@ -138,6 +159,7 @@ For the one-command path:
 ```sh
 yt-scribe --json run "<youtube-url>"
 yt-scribe --json run "<youtube-url>" --focus "Keep only action items"
+yt-scribe --json run "<youtube-url>" --timestamps
 ```
 
 Use styles intentionally:
@@ -150,6 +172,10 @@ Use styles intentionally:
 Use `--focus "..."` or `--focus-file instructions.md` when the user wants
 specific emphasis while keeping the normal harness prompt. Use `--instruction`
 or `--prompt-file` only when the user needs to replace the whole polishing prompt.
+
+Use `--timestamps` when the user needs polished output with source anchors. For
+`run`, yt-scribe passes transcript segment start times to the polisher. For
+`polish`, the input transcript should already contain useful timestamp anchors.
 
 ## Safety
 
@@ -229,7 +255,10 @@ Read exactly one harness file based on how the transcript was provided:
 - Honor custom user instructions passed by `yt-scribe`. When they conflict with
   the selected output mode, the custom instructions win unless they would require
   adding unsupported facts.
-- Remove caption artifacts, repeated fragments, filler, obvious false starts, and timestamp residue.
+- Remove caption artifacts, repeated fragments, filler, obvious false starts,
+  and timestamp residue unless timestamp grounding was requested.
+- When timestamp grounding is requested, preserve useful timestamp anchors from
+  the provided transcript near important claims. Do not invent timestamps.
 - Do not add facts, examples, citations, links, or claims that are not in the transcript.
 - Do not mention that you used a skill, a harness, stdin, an attached file, or a cleaning process.
 - If the transcript is empty or unusable, say that the transcript content is missing or unusable.
@@ -729,6 +758,428 @@ def srt_timestamp(seconds: float) -> str:
     return f"{hours:02}:{minutes:02}:{secs:02},{ms:03}"
 
 
+def timestamp_anchor(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    hours, rest = divmod(total_seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours:02}:{minutes:02}:{secs:02}"
+    return f"{minutes:02}:{secs:02}"
+
+
+def render_timestamped_transcript(transcript: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for segment in transcript.get("segments", []):
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            continue
+        start = float(segment.get("start") or 0)
+        lines.append(f"[{timestamp_anchor(start)}] {text}")
+    return "\n".join(lines)
+
+
+def split_transcript_chunks(
+    transcript: dict[str, Any],
+    chunk_chars: int,
+    timestamps: bool,
+) -> list[str]:
+    if chunk_chars <= 0:
+        return [render_timestamped_transcript(transcript) if timestamps else transcript["text"]]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+    for segment in transcript.get("segments", []):
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            continue
+        if timestamps:
+            start = float(segment.get("start") or 0)
+            text = f"[{timestamp_anchor(start)}] {text}"
+        projected = current_chars + len(text) + (1 if current else 0)
+        if current and projected > chunk_chars:
+            chunks.append("\n".join(current))
+            current = [text]
+            current_chars = len(text)
+        else:
+            current.append(text)
+            current_chars = projected
+    if current:
+        chunks.append("\n".join(current))
+    if not chunks:
+        chunks.append("")
+    return chunks
+
+
+def chunk_artifact_dir(out_path: str | None) -> Path | None:
+    if not out_path:
+        return None
+    return Path(f"{out_path}.chunks").expanduser().resolve()
+
+
+def chunk_output_path(directory: Path, index: int) -> Path:
+    return directory / f"chunk-{index:03}.md"
+
+
+def merge_chunk_instruction(instruction: str) -> str:
+    return (
+        "Merge these polished transcript chunks into one coherent polished output. "
+        "Remove duplicate headings introduced by chunking, preserve the original order, "
+        "and do not add facts that are not present in the chunk outputs.\n\n"
+        "Original polishing instruction:\n"
+        f"{instruction}"
+    )
+
+
+def chunking_disabled_payload() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "chunk_chars": 0,
+        "chunks": 1,
+        "merge_status": "not_needed",
+        "chunk_artifact_dir": None,
+        "resumed_chunks": 0,
+    }
+
+
+def run_chunked_agent_polish(
+    chunks: list[str],
+    instruction: str,
+    out_path: str | None,
+    model: str | None,
+    cwd: str | None,
+    harness: str,
+    chunk_chars: int,
+    resume: bool,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
+    if len(chunks) <= 1:
+        result = run_agent_polish(
+            transcript_text=chunks[0] if chunks else "",
+            instruction=instruction,
+            out_path=out_path,
+            model=model,
+            cwd=cwd,
+            harness=harness,
+            progress=progress,
+        )
+        result["chunking"] = {
+            "enabled": True,
+            "chunk_chars": chunk_chars,
+            "chunks": len(chunks),
+            "merge_status": "not_needed",
+            "chunk_artifact_dir": None,
+            "resumed_chunks": 0,
+        }
+        return result
+
+    artifact_dir = chunk_artifact_dir(out_path)
+    if artifact_dir:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    polished_chunks: list[str] = []
+    resumed_chunks = 0
+    for index, chunk in enumerate(chunks, start=1):
+        chunk_path = chunk_output_path(artifact_dir, index) if artifact_dir else None
+        if resume and chunk_path and chunk_path.is_file():
+            polished_chunks.append(chunk_path.read_text(encoding="utf-8"))
+            resumed_chunks += 1
+            continue
+        try:
+            result = run_agent_polish(
+                transcript_text=chunk,
+                instruction=instruction,
+                out_path=str(chunk_path) if chunk_path else None,
+                model=model,
+                cwd=cwd,
+                harness=harness,
+                progress=progress,
+            )
+        except CliError as exc:
+            raise CliError(
+                f"Chunk {index} polish failed: {exc}",
+                "chunk_polish_failed",
+                {"chunk_index": index, "error_code": exc.code},
+            ) from exc
+        polished_chunks.append(result["text"])
+
+    merge_input = "\n\n".join(
+        f"## Chunk {index}\n\n{chunk.strip()}"
+        for index, chunk in enumerate(polished_chunks, start=1)
+    )
+    try:
+        result = run_agent_polish(
+            transcript_text=merge_input,
+            instruction=merge_chunk_instruction(instruction),
+            out_path=out_path,
+            model=model,
+            cwd=cwd,
+            harness=harness,
+            progress=progress,
+        )
+    except CliError as exc:
+        raise CliError(
+            f"Chunk merge failed: {exc}",
+            "chunk_merge_failed",
+            {"chunks": len(chunks), "error_code": exc.code},
+        ) from exc
+
+    result["chunking"] = {
+        "enabled": True,
+        "chunk_chars": chunk_chars,
+        "chunks": len(chunks),
+        "merge_status": "merged",
+        "chunk_artifact_dir": str(artifact_dir) if artifact_dir else None,
+        "resumed_chunks": resumed_chunks,
+    }
+    return result
+
+
+VERIFY_STOPWORDS = {
+    "about",
+    "after",
+    "also",
+    "and",
+    "are",
+    "but",
+    "for",
+    "from",
+    "has",
+    "have",
+    "into",
+    "that",
+    "the",
+    "this",
+    "was",
+    "were",
+    "with",
+}
+
+
+def normalize_verification_text(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+
+
+def strip_markdown_marker(line: str) -> str:
+    return re.sub(r"^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)", "", line).strip()
+
+
+def split_polished_claims(text: str) -> list[str]:
+    claims: list[str] = []
+    for line in text.splitlines():
+        claim = strip_markdown_marker(line)
+        if not claim:
+            continue
+        parts = re.split(r"(?<=[.!?])\s+", claim)
+        claims.extend(part.strip() for part in parts if part.strip())
+    return claims
+
+
+def verification_terms(text: str) -> list[str]:
+    terms = re.findall(r"[A-Za-z][A-Za-z'-]*|\d+(?:[.,:/-]\d+)*", text)
+    return [
+        term
+        for term in terms
+        if normalize_verification_text(term) not in VERIFY_STOPWORDS
+    ]
+
+
+def risky_verification_terms(text: str) -> list[str]:
+    names = re.findall(r"\b[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*\b", text)
+    numbers = re.findall(r"\b\d+(?:[.,:/-]\d+)*\b", text)
+    terms = []
+    for term in [*names, *numbers]:
+        normalized = normalize_verification_text(term)
+        if normalized and normalized not in VERIFY_STOPWORDS and term not in terms:
+            terms.append(term)
+    return terms
+
+
+def transcript_entries_from_text(text: str) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = re.match(r"^\[(\d{2}:\d{2}(?::\d{2})?)\]\s*(.+)$", stripped)
+        if match:
+            anchor, entry_text = match.groups()
+        else:
+            anchor, entry_text = "", stripped
+        entries.append(
+            {
+                "anchor": anchor,
+                "text": entry_text,
+                "normalized": normalize_verification_text(entry_text),
+            }
+        )
+    return entries
+
+
+def transcript_entries_from_segments(segments: list[Any]) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            continue
+        anchor = timestamp_anchor(float(segment.get("start") or 0))
+        entries.append(
+            {
+                "anchor": anchor,
+                "text": text,
+                "normalized": normalize_verification_text(text),
+            }
+        )
+    return entries
+
+
+def load_verification_transcript(path: str | Path) -> dict[str, Any]:
+    text = Path(path).expanduser().read_text(encoding="utf-8")
+    stripped = text.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            segments = parsed.get("segments")
+            if isinstance(segments, list):
+                entries = transcript_entries_from_segments(segments)
+                transcript_text = "\n".join(entry["text"] for entry in entries)
+                return {"text": transcript_text, "entries": entries}
+            if isinstance(parsed.get("text"), str):
+                transcript_text = parsed["text"]
+                return {
+                    "text": transcript_text,
+                    "entries": transcript_entries_from_text(transcript_text),
+                }
+        if isinstance(parsed, list):
+            entries = transcript_entries_from_segments(parsed)
+            transcript_text = "\n".join(entry["text"] for entry in entries)
+            return {"text": transcript_text, "entries": entries}
+    return {"text": text, "entries": transcript_entries_from_text(text)}
+
+
+def find_transcript_anchor(
+    claim_terms: list[str],
+    transcript_entries: list[dict[str, str]],
+) -> str | None:
+    normalized_terms = [normalize_verification_text(term) for term in claim_terms]
+    normalized_terms = [term for term in normalized_terms if term]
+    best_entry: dict[str, str] | None = None
+    best_score = 0
+    for entry in transcript_entries:
+        entry_text = entry["normalized"]
+        score = sum(1 for term in normalized_terms if term in entry_text)
+        if score > best_score:
+            best_entry = entry
+            best_score = score
+    if best_entry and best_entry["anchor"]:
+        return best_entry["anchor"]
+    return None
+
+
+def verify_claim(
+    claim: str,
+    transcript_text: str,
+    transcript_entries: list[dict[str, str]],
+    index: int,
+) -> dict[str, Any]:
+    transcript_normalized = normalize_verification_text(transcript_text)
+    claim_normalized = normalize_verification_text(claim)
+    terms = verification_terms(claim)
+    unsupported_terms = [
+        term
+        for term in risky_verification_terms(claim)
+        if normalize_verification_text(term) not in transcript_normalized
+    ]
+    anchor = find_transcript_anchor(terms, transcript_entries)
+
+    if claim_normalized and claim_normalized in transcript_normalized:
+        status = "supported"
+        severity = "info"
+        message = "The claim text appears in the transcript."
+    elif unsupported_terms:
+        status = "unsupported"
+        severity = "high"
+        message = "The claim contains names or numbers not found in the transcript."
+    else:
+        normalized_terms = [normalize_verification_text(term) for term in terms]
+        normalized_terms = [term for term in normalized_terms if term]
+        supported_terms = [term for term in normalized_terms if term in transcript_normalized]
+        if normalized_terms and len(supported_terms) == len(normalized_terms):
+            status = "supported"
+            severity = "info"
+            message = "The claim's key terms appear in the transcript."
+        elif normalized_terms and not supported_terms and len(normalized_terms) >= 3:
+            status = "unsupported"
+            severity = "medium"
+            message = "No key terms from the claim were found in the transcript."
+        else:
+            status = "uncertain"
+            severity = "medium"
+            message = "The claim could not be confirmed or rejected deterministically."
+
+    return {
+        "index": index,
+        "status": status,
+        "severity": severity,
+        "claim": claim,
+        "message": message,
+        "unsupported_terms": unsupported_terms,
+        "transcript_anchor": anchor,
+    }
+
+
+def verify_polished_output(polished_text: str, transcript_text: str) -> dict[str, Any]:
+    transcript_entries = transcript_entries_from_text(transcript_text)
+    findings = [
+        verify_claim(claim, transcript_text, transcript_entries, index)
+        for index, claim in enumerate(split_polished_claims(polished_text), start=1)
+    ]
+    summary = {
+        "claims": len(findings),
+        "supported": sum(1 for finding in findings if finding["status"] == "supported"),
+        "unsupported": sum(1 for finding in findings if finding["status"] == "unsupported"),
+        "uncertain": sum(1 for finding in findings if finding["status"] == "uncertain"),
+    }
+    return {"summary": summary, "findings": findings}
+
+
+def verify_polished_file(polished_path: str | Path, transcript_path: str | Path) -> dict[str, Any]:
+    polished_text = Path(polished_path).expanduser().read_text(encoding="utf-8")
+    transcript = load_verification_transcript(transcript_path)
+    findings = [
+        verify_claim(claim, transcript["text"], transcript["entries"], index)
+        for index, claim in enumerate(split_polished_claims(polished_text), start=1)
+    ]
+    summary = {
+        "claims": len(findings),
+        "supported": sum(1 for finding in findings if finding["status"] == "supported"),
+        "unsupported": sum(1 for finding in findings if finding["status"] == "unsupported"),
+        "uncertain": sum(1 for finding in findings if finding["status"] == "uncertain"),
+    }
+    return {"summary": summary, "findings": findings}
+
+
+def render_verification(result: dict[str, Any]) -> str:
+    summary = result["summary"]
+    lines = [
+        (
+            f"claims: {summary['claims']}, supported: {summary['supported']}, "
+            f"unsupported: {summary['unsupported']}, uncertain: {summary['uncertain']}"
+        )
+    ]
+    for finding in result["findings"]:
+        anchor = f" [{finding['transcript_anchor']}]" if finding["transcript_anchor"] else ""
+        lines.append(
+            f"- {finding['status']}{anchor}: {finding['claim']}\n  {finding['message']}"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def render_transcript(transcript: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
         return json.dumps(transcript, ensure_ascii=False, indent=2)
@@ -752,11 +1203,32 @@ def cache_dir_from_args(args: argparse.Namespace) -> Path | None:
     return None
 
 
+def validate_proxy_url(value: str, source: str) -> str:
+    parsed = urllib.parse.urlparse(value)
+    if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+        raise CliError(
+            f"{source} must be a full proxy URL like http://user:pass@host:8080",
+            "invalid_proxy_config",
+        )
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise CliError(
+            f"{source} has an invalid port. Use a numeric port, not a placeholder.",
+            "invalid_proxy_config",
+        ) from exc
+    return value
+
+
 def proxy_config_from_args(args: argparse.Namespace) -> GenericProxyConfig | None:
     http_proxy = getattr(args, "http_proxy", None) or os.environ.get(HTTP_PROXY_ENV_VAR)
     https_proxy = getattr(args, "https_proxy", None) or os.environ.get(HTTPS_PROXY_ENV_VAR)
     if not http_proxy and not https_proxy:
         return None
+    if http_proxy:
+        http_proxy = validate_proxy_url(http_proxy, "--http-proxy")
+    if https_proxy:
+        https_proxy = validate_proxy_url(https_proxy, "--https-proxy")
     try:
         return GenericProxyConfig(http_url=http_proxy, https_url=https_proxy)
     except InvalidProxyConfig as exc:
@@ -818,6 +1290,58 @@ def write_text(path: str | None, text: str) -> str | None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
     return str(target)
+
+
+def bundle_paths(bundle_dir: str | None) -> dict[str, str] | None:
+    if not bundle_dir:
+        return None
+    root = Path(bundle_dir).expanduser().resolve()
+    return {
+        "dir": str(root),
+        "transcript": str(root / "transcript.txt"),
+        "polished": str(root / "polished.md"),
+        "metadata": str(root / "metadata.json"),
+    }
+
+
+def write_bundle_metadata(path: str, data: dict[str, Any]) -> str:
+    target = Path(path).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(target)
+
+
+def init_project(project_dir: str | Path, profile: str | None = None) -> dict[str, Any]:
+    root = Path(project_dir).expanduser().resolve()
+    yt_scribe_dir = root / ".yt-scribe"
+    yt_scribe_dir.mkdir(parents=True, exist_ok=True)
+    guidance_path = yt_scribe_dir / "AGENTS.md"
+    config_path = yt_scribe_dir / "config.json"
+    guidance = (
+        "# yt-scribe\n\n"
+        "Use `yt-scribe` for YouTube transcript workflows in this project.\n\n"
+        "- Prefer `yt-scribe run \"<youtube-url>\"` for one-command notes.\n"
+        "- Use `yt-scribe inspect \"<youtube-url>\" --brief` before assuming captions exist.\n"
+        "- Do not bypass private, disabled, unavailable, or missing caption tracks.\n"
+        "- Do not add facts that are not in the transcript.\n"
+    )
+    guidance_path.write_text(guidance, encoding="utf-8")
+    config = {"profiles": {}}
+    if profile:
+        config["profiles"][profile] = {
+            "style": "notes",
+            "template": "research",
+            "front_matter": True,
+        }
+    config_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "dir": str(yt_scribe_dir),
+        "guidance_path": str(guidance_path),
+        "config_path": str(config_path),
+    }
 
 
 def front_matter_scalar(value: Any) -> str:
@@ -921,6 +1445,52 @@ def read_batch_urls(path: str | Path) -> list[str]:
         if stripped and not stripped.startswith("#"):
             urls.append(stripped)
     return urls
+
+
+def playlist_id_from_url(value: str) -> str | None:
+    parsed = urllib.parse.urlparse(value)
+    query = urllib.parse.parse_qs(parsed.query)
+    playlist_ids = query.get("list") or []
+    if playlist_ids:
+        return playlist_ids[0]
+    return None
+
+
+def fetch_playlist_video_ids(
+    playlist_url: str,
+    proxy_config: GenericProxyConfig | None = None,
+) -> list[str]:
+    payload = http_get(playlist_url, proxy_config).decode("utf-8", errors="replace")
+    seen: set[str] = set()
+    video_ids: list[str] = []
+    for video_id in re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', payload):
+        if video_id not in seen:
+            seen.add(video_id)
+            video_ids.append(video_id)
+    if not video_ids:
+        raise CliError("No videos were found in this playlist", "playlist_empty")
+    return video_ids
+
+
+def expand_batch_items(
+    urls: list[str],
+    proxy_config: GenericProxyConfig | None,
+) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for url in urls:
+        playlist_id = playlist_id_from_url(url)
+        if not playlist_id:
+            items.append({"url": url})
+            continue
+        for video_id in fetch_playlist_video_ids(url, proxy_config):
+            items.append(
+                {
+                    "url": canonical_watch_url(video_id),
+                    "playlist_url": url,
+                    "playlist_id": playlist_id,
+                }
+            )
+    return items
 
 
 def command_path(name: str) -> str | None:
@@ -1080,6 +1650,9 @@ def read_config() -> dict[str, Any]:
             f"Unsupported default_agent_harness in config: {harness}",
             "invalid_config",
         )
+    profiles = loaded.get("profiles")
+    if profiles is not None and not isinstance(profiles, dict):
+        raise CliError("Config profiles must be a JSON object", "invalid_config")
     return loaded
 
 
@@ -1101,7 +1674,64 @@ def config_payload(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "path": str(config_path()),
         "default_agent_harness": config.get("default_agent_harness"),
         "effective_agent_harness": effective_agent_harness(config),
+        "profiles": config.get("profiles") or {},
     }
+
+
+def normalize_profile_languages(value: str | list[str] | tuple[str, ...]) -> list[str]:
+    return normalize_languages(value)
+
+
+def profile_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    profile: dict[str, Any] = {}
+    for key in ("style", "template", "agent_harness"):
+        value = getattr(args, key, None)
+        if value:
+            profile[key] = value
+    if getattr(args, "langs", None):
+        profile["langs"] = normalize_profile_languages(args.langs)
+    if getattr(args, "focus", None):
+        profile["focus"] = args.focus
+    if getattr(args, "front_matter", False):
+        profile["front_matter"] = True
+    if getattr(args, "timestamps", False):
+        profile["timestamps"] = True
+    if getattr(args, "chunk_chars", None) is not None:
+        profile["chunk_chars"] = args.chunk_chars
+    return profile
+
+
+def get_profile(config: dict[str, Any], name: str) -> dict[str, Any]:
+    profiles = config.get("profiles") or {}
+    profile = profiles.get(name)
+    if not isinstance(profile, dict):
+        raise CliError(f"Profile not found: {name}", "profile_not_found")
+    return profile
+
+
+def apply_profile(args: argparse.Namespace) -> None:
+    profile_name = getattr(args, "profile", None)
+    profile = get_profile(read_config(), profile_name) if profile_name else {}
+    if getattr(args, "style", None) is None:
+        args.style = profile.get("style") or "notes"
+    if getattr(args, "template", None) is None:
+        args.template = profile.get("template")
+    if not getattr(args, "focus", None) and profile.get("focus"):
+        args.focus = list(profile["focus"])
+    if hasattr(args, "langs") and getattr(args, "langs", None) is None and profile.get("langs"):
+        args.langs = ",".join(profile["langs"])
+    if (
+        hasattr(args, "agent_harness")
+        and getattr(args, "agent_harness", None) is None
+        and profile.get("agent_harness")
+    ):
+        args.agent_harness = profile["agent_harness"]
+    if hasattr(args, "front_matter") and not args.front_matter and profile.get("front_matter"):
+        args.front_matter = True
+    if hasattr(args, "timestamps") and not args.timestamps and profile.get("timestamps"):
+        args.timestamps = True
+    if hasattr(args, "chunk_chars") and not args.chunk_chars and profile.get("chunk_chars"):
+        args.chunk_chars = int(profile["chunk_chars"])
 
 
 def agent_harness_status() -> dict[str, Any]:
@@ -1427,6 +2057,11 @@ def custom_instruction_parts(args: argparse.Namespace) -> tuple[list[str], list[
     parts: list[str] = []
     sources: list[str] = []
 
+    template = getattr(args, "template", None)
+    if template:
+        parts.append(TEMPLATE_INSTRUCTIONS[template])
+        sources.append("--template")
+
     for focus in getattr(args, "focus", None) or []:
         focus = focus.strip()
         if focus:
@@ -1443,6 +2078,7 @@ def custom_instruction_parts(args: argparse.Namespace) -> tuple[list[str], list[
 
 
 def resolve_instruction(args: argparse.Namespace, harness: str) -> PolishInstruction:
+    timestamp_sources = ["--timestamps"] if getattr(args, "timestamps", False) else []
     replacement_sources = [
         source
         for source, value in (
@@ -1467,17 +2103,28 @@ def resolve_instruction(args: argparse.Namespace, harness: str) -> PolishInstruc
 
     if getattr(args, "prompt_file", None):
         text = Path(args.prompt_file).expanduser().read_text(encoding="utf-8").strip()
-        return PolishInstruction(text=text, mode="replace", sources=["--prompt-file"])
-    if getattr(args, "instruction", None):
+        if timestamp_sources:
+            text += f"\n\n{TIMESTAMP_GROUNDING_INSTRUCTION}"
         return PolishInstruction(
-            text=args.instruction.strip(),
+            text=text,
             mode="replace",
-            sources=["--instruction"],
+            sources=["--prompt-file", *timestamp_sources],
+        )
+    if getattr(args, "instruction", None):
+        text = args.instruction.strip()
+        if timestamp_sources:
+            text += f"\n\n{TIMESTAMP_GROUNDING_INSTRUCTION}"
+        return PolishInstruction(
+            text=text,
+            mode="replace",
+            sources=["--instruction", *timestamp_sources],
         )
 
     text = style_instruction(getattr(args, "style", "notes"), harness)
+    if timestamp_sources:
+        text += f"\n\n{TIMESTAMP_GROUNDING_INSTRUCTION}"
     if not custom_parts:
-        return PolishInstruction(text=text, mode="style", sources=["--style"])
+        return PolishInstruction(text=text, mode="style", sources=["--style", *timestamp_sources])
 
     custom_text = "\n\n".join(custom_parts)
     text += (
@@ -1486,7 +2133,11 @@ def resolve_instruction(args: argparse.Namespace, harness: str) -> PolishInstruc
         "style. They do not allow adding facts that are not in the transcript.\n\n"
         f"{custom_text}"
     )
-    return PolishInstruction(text=text, mode="custom", sources=custom_sources)
+    return PolishInstruction(
+        text=text,
+        mode="custom",
+        sources=[*custom_sources, *timestamp_sources],
+    )
 
 
 def read_instruction(args: argparse.Namespace, harness: str) -> str:
@@ -1508,6 +2159,9 @@ def harness_label(harness: str) -> str:
 
 
 def handle_args(args: argparse.Namespace) -> int:
+    if args.command in {"polish", "run", "batch"}:
+        apply_profile(args)
+
     if args.command == "setup":
         payload = {"ok": True, "setup": setup_payload()}
         doctor = payload["setup"]["doctor"]
@@ -1535,6 +2189,18 @@ def handle_args(args: argparse.Namespace) -> int:
         emit(payload, args.json, text)
         return 0
 
+    if args.command == "init-project":
+        result = init_project(args.dir, args.profile)
+        payload = {"ok": True, "init_project": result}
+        text = (
+            "Initialized yt-scribe project guidance:\n"
+            f"  dir: {result['dir']}\n"
+            f"  guidance: {result['guidance_path']}\n"
+            f"  config: {result['config_path']}\n"
+        )
+        emit(payload, args.json, text)
+        return 0
+
     if args.command == "config":
         config = read_config()
         if args.config_command == "set":
@@ -1543,6 +2209,23 @@ def handle_args(args: argparse.Namespace) -> int:
         elif args.config_command == "unset":
             config.pop("default_agent_harness", None)
             write_config(config)
+        elif args.config_command == "profile":
+            profiles = config.setdefault("profiles", {})
+            if args.profile_command == "set":
+                profiles[args.name] = profile_from_args(args)
+                write_config(config)
+            elif args.profile_command == "remove":
+                profiles.pop(args.name, None)
+                write_config(config)
+            elif args.profile_command == "get":
+                profile = get_profile(config, args.name)
+                payload = {
+                    "ok": True,
+                    "profile": {"name": args.name, "values": profile},
+                    "config": config_payload(config),
+                }
+                emit(payload, args.json)
+                return 0
 
         payload = {"ok": True, "config": config_payload(config)}
         text = (
@@ -1582,6 +2265,34 @@ def handle_args(args: argparse.Namespace) -> int:
                 "tracks": [track.public_dict() for track in tracks],
             },
         }
+        if args.brief:
+            manual_languages = [
+                track.language_code for track in tracks if not track.auto_generated
+            ]
+            auto_generated_languages = [
+                track.language_code for track in tracks if track.auto_generated
+            ]
+            payload = {
+                "ok": True,
+                "video": {
+                    "id": video_id,
+                    "url": canonical_watch_url(video_id),
+                    "has_captions": bool(tracks),
+                    "caption_tracks": len(tracks),
+                    "languages": [track.language_code for track in tracks],
+                    "manual_languages": manual_languages,
+                    "auto_generated_languages": auto_generated_languages,
+                },
+            }
+            language_text = ", ".join(payload["video"]["languages"]) or "none"
+            track_word = "track" if len(tracks) == 1 else "tracks"
+            text = (
+                f"{canonical_watch_url(video_id)}\n"
+                f"captions: {'yes' if tracks else 'no'} ({len(tracks)} {track_word})\n"
+                f"languages: {language_text}\n"
+            )
+            emit(payload, args.json, text)
+            return 0
         text = (
             f"{canonical_watch_url(video_id)}\n"
             + "\n".join(
@@ -1657,6 +2368,7 @@ def handle_args(args: argparse.Namespace) -> int:
                 "style": args.style,
                 "instruction_mode": instruction.mode,
                 "instruction_sources": instruction.sources,
+                "timestamp_grounding": args.timestamps,
                 "agent_harness": result["harness"],
                 "output_path": result["output_path"],
                 "chars": result["chars"],
@@ -1686,30 +2398,53 @@ def handle_args(args: argparse.Namespace) -> int:
             f"Fetched {segment_count} transcript {segment_word} "
             f"({len(transcript['text'])} chars)"
         )
+        bundle = bundle_paths(args.bundle_dir)
+        transcript_target = args.transcript or (bundle["transcript"] if bundle else None)
         rendered = render_transcript(transcript, args.transcript_format)
-        transcript_path = write_text(args.transcript, rendered)
+        transcript_path = write_text(transcript_target, rendered)
         if transcript_path:
             progress.message(f"Wrote raw transcript to {transcript_path}")
-        transcript_text = limit_text(transcript["text"], args.max_chars)
-        if args.max_chars and len(transcript["text"]) > len(transcript_text):
+        transcript_text = (
+            render_timestamped_transcript(transcript) if args.timestamps else transcript["text"]
+        )
+        original_transcript_chars = len(transcript_text)
+        transcript_text = limit_text(transcript_text, args.max_chars)
+        if args.max_chars and original_transcript_chars > len(transcript_text):
             progress.message(f"Truncated transcript to {len(transcript_text)} chars")
         out_path = (
             args.out
             if args.stdout
-            else args.out or str(default_run_output_path(transcript["video_id"], args.style))
+            else args.out
+            or (bundle["polished"] if bundle else None)
+            or str(default_run_output_path(transcript["video_id"], args.style))
         )
         harness = selected_agent_harness(args)
         instruction = resolve_instruction(args, harness)
         progress.message(f"Using {harness_label(harness)}")
-        result = run_agent_polish(
-            transcript_text=transcript_text,
-            instruction=instruction.text,
-            out_path=out_path,
-            model=args.model,
-            cwd=args.cd,
-            harness=harness,
-            progress=progress,
-        )
+        if args.chunk_chars:
+            chunks = split_transcript_chunks(transcript, args.chunk_chars, args.timestamps)
+            result = run_chunked_agent_polish(
+                chunks=chunks,
+                instruction=instruction.text,
+                out_path=out_path,
+                model=args.model,
+                cwd=args.cd,
+                harness=harness,
+                chunk_chars=args.chunk_chars,
+                resume=args.resume,
+                progress=progress,
+            )
+        else:
+            result = run_agent_polish(
+                transcript_text=transcript_text,
+                instruction=instruction.text,
+                out_path=out_path,
+                model=args.model,
+                cwd=args.cd,
+                harness=harness,
+                progress=progress,
+            )
+            result["chunking"] = chunking_disabled_payload()
         if args.front_matter:
             result = apply_output_prefix(
                 result,
@@ -1729,14 +2464,46 @@ def handle_args(args: argparse.Namespace) -> int:
                 "style": args.style,
                 "instruction_mode": instruction.mode,
                 "instruction_sources": instruction.sources,
+                "timestamp_grounding": args.timestamps,
                 "agent_harness": result["harness"],
                 "transcript_path": transcript_path,
                 "output_path": result["output_path"],
                 "chars": result["chars"],
                 "front_matter": args.front_matter,
+                "chunking": result["chunking"],
                 "cache": cache,
+                "bundle": None,
             },
         }
+        if bundle:
+            metadata_path = write_bundle_metadata(
+                bundle["metadata"],
+                {
+                    "video_id": transcript["video_id"],
+                    "url": transcript["url"],
+                    "language": transcript["language"],
+                    "requested_languages": transcript.get(
+                        "requested_languages",
+                        requested_languages(args),
+                    ),
+                    "style": args.style,
+                    "template": args.template,
+                    "instruction_mode": instruction.mode,
+                    "instruction_sources": instruction.sources,
+                    "timestamp_grounding": args.timestamps,
+                    "agent_harness": result["harness"],
+                    "transcript_path": transcript_path,
+                    "output_path": result["output_path"],
+                    "chunking": result["chunking"],
+                    "cache": cache,
+                },
+            )
+            payload["run"]["bundle"] = {
+                "dir": bundle["dir"],
+                "transcript": transcript_path,
+                "polished": result["output_path"],
+                "metadata": metadata_path,
+            }
         if args.json:
             emit(payload, True)
         elif result["output_path"]:
@@ -1756,11 +2523,18 @@ def handle_args(args: argparse.Namespace) -> int:
         languages = requested_languages(args)
         cache_dir = cache_dir_from_args(args)
         proxy_config = proxy_config_from_args(args)
+        batch_inputs = expand_batch_items(urls, proxy_config)
         harness = selected_agent_harness(args)
         instruction = resolve_instruction(args, harness)
 
-        for index, url in enumerate(urls, start=1):
-            progress.message(f"Batch item {index}/{len(urls)}: {url}")
+        for index, batch_input in enumerate(batch_inputs, start=1):
+            url = batch_input["url"]
+            source_metadata = {
+                key: value
+                for key, value in batch_input.items()
+                if key in {"playlist_url", "playlist_id"}
+            }
+            progress.message(f"Batch item {index}/{len(batch_inputs)}: {url}")
             try:
                 video_id = extract_video_id(url)
                 output_path = batch_output_path(out_dir, video_id, args.style)
@@ -1768,6 +2542,7 @@ def handle_args(args: argparse.Namespace) -> int:
                     items.append(
                         {
                             "url": url,
+                            **source_metadata,
                             "video_id": video_id,
                             "status": "skipped",
                             "output_path": str(output_path),
@@ -1784,15 +2559,35 @@ def handle_args(args: argparse.Namespace) -> int:
                     proxy_config,
                 )
                 output_path = batch_output_path(out_dir, transcript["video_id"], args.style)
-                result = run_agent_polish(
-                    transcript_text=limit_text(transcript["text"], args.max_chars),
-                    instruction=instruction.text,
-                    out_path=str(output_path),
-                    model=args.model,
-                    cwd=args.cd,
-                    harness=harness,
-                    progress=progress,
-                )
+                if args.chunk_chars:
+                    chunks = split_transcript_chunks(transcript, args.chunk_chars, args.timestamps)
+                    result = run_chunked_agent_polish(
+                        chunks=chunks,
+                        instruction=instruction.text,
+                        out_path=str(output_path),
+                        model=args.model,
+                        cwd=args.cd,
+                        harness=harness,
+                        chunk_chars=args.chunk_chars,
+                        resume=args.resume,
+                        progress=progress,
+                    )
+                else:
+                    result = run_agent_polish(
+                        transcript_text=limit_text(
+                            render_timestamped_transcript(transcript)
+                            if args.timestamps
+                            else transcript["text"],
+                            args.max_chars,
+                        ),
+                        instruction=instruction.text,
+                        out_path=str(output_path),
+                        model=args.model,
+                        cwd=args.cd,
+                        harness=harness,
+                        progress=progress,
+                    )
+                    result["chunking"] = chunking_disabled_payload()
                 if args.front_matter:
                     result = apply_output_prefix(
                         result,
@@ -1801,6 +2596,7 @@ def handle_args(args: argparse.Namespace) -> int:
                 items.append(
                     {
                         "url": transcript["url"],
+                        **source_metadata,
                         "video_id": transcript["video_id"],
                         "status": "succeeded",
                         "language": transcript["language"],
@@ -1809,6 +2605,8 @@ def handle_args(args: argparse.Namespace) -> int:
                         "output_path": result["output_path"],
                         "transcript_path": None,
                         "chars": result["chars"],
+                        "timestamp_grounding": args.timestamps,
+                        "chunking": result["chunking"],
                         "cache": cache,
                     }
                 )
@@ -1816,6 +2614,7 @@ def handle_args(args: argparse.Namespace) -> int:
                 items.append(
                     {
                         "url": url,
+                        **source_metadata,
                         "status": "failed",
                         "error": {
                             "code": exc.code,
@@ -1834,6 +2633,11 @@ def handle_args(args: argparse.Namespace) -> int:
             "out_dir": str(out_dir),
             "manifest_path": str(manifest_path),
             "style": args.style,
+            "timestamp_grounding": args.timestamps,
+            "chunking": {
+                "enabled": bool(args.chunk_chars),
+                "chunk_chars": args.chunk_chars,
+            },
             "requested_languages": languages,
             "succeeded": succeeded,
             "failed": failed,
@@ -1847,6 +2651,22 @@ def handle_args(args: argparse.Namespace) -> int:
         payload = {"ok": failed == 0, "batch": manifest}
         emit(payload, args.json, f"Wrote batch manifest to {manifest_path}\n")
         return 0 if failed == 0 else 1
+
+    if args.command == "verify":
+        polished_path = Path(args.file).expanduser().resolve()
+        transcript_path = Path(args.transcript).expanduser().resolve()
+        result = verify_polished_file(polished_path, transcript_path)
+        ok = result["summary"]["unsupported"] == 0
+        payload = {
+            "ok": ok,
+            "verify": {
+                "polished_path": str(polished_path),
+                "transcript_path": str(transcript_path),
+                **result,
+            },
+        }
+        emit(payload, args.json, render_verification(result))
+        return 0 if ok else 1
 
     if args.command == "raw":
         video_id = extract_video_id(args.url)
@@ -1877,8 +2697,13 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--style",
         choices=sorted(STYLE_INSTRUCTIONS),
-        default="notes",
+        default=None,
         help="polished output style, default: notes",
+    )
+    parser.add_argument(
+        "--template",
+        choices=sorted(TEMPLATE_INSTRUCTIONS),
+        help="safe output structure to compose with the selected style",
     )
     parser.add_argument("--out", help="write polished output to this file")
     parser.add_argument(
@@ -1908,6 +2733,11 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
         help="advanced: read the full replacement prompt from a file",
     )
     parser.add_argument(
+        "--timestamps",
+        action="store_true",
+        help="ask the polisher to preserve useful timestamp anchors",
+    )
+    parser.add_argument(
         "--agent-harness",
         choices=AGENT_HARNESSES,
         help=(
@@ -1916,6 +2746,7 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument("--model", help="optional agent model override")
+    parser.add_argument("--profile", help="named workflow profile from config")
     parser.add_argument("--cd", help="working directory to pass to the agent harness")
     parser.add_argument(
         "--max-chars",
@@ -1973,6 +2804,29 @@ ai contract:
         choices=["default-agent-harness"],
         help="config key to clear",
     )
+    config_profile_parser = config_subparsers.add_parser(
+        "profile",
+        help="create, inspect, or remove named workflow profiles",
+    )
+    profile_subparsers = config_profile_parser.add_subparsers(
+        dest="profile_command",
+        required=True,
+        metavar="command",
+    )
+    profile_set_parser = profile_subparsers.add_parser("set", help="create or replace a profile")
+    profile_set_parser.add_argument("name", help="profile name")
+    profile_set_parser.add_argument("--style", choices=sorted(STYLE_INSTRUCTIONS))
+    profile_set_parser.add_argument("--langs", help="ordered comma-separated caption languages")
+    profile_set_parser.add_argument("--focus", action="append", help="profile focus instruction")
+    profile_set_parser.add_argument("--template", choices=sorted(TEMPLATE_INSTRUCTIONS))
+    profile_set_parser.add_argument("--front-matter", action="store_true")
+    profile_set_parser.add_argument("--timestamps", action="store_true")
+    profile_set_parser.add_argument("--chunk-chars", type=int)
+    profile_set_parser.add_argument("--agent-harness", choices=AGENT_HARNESSES)
+    profile_get_parser = profile_subparsers.add_parser("get", help="show a profile")
+    profile_get_parser.add_argument("name", help="profile name")
+    profile_remove_parser = profile_subparsers.add_parser("remove", help="remove a profile")
+    profile_remove_parser.add_argument("name", help="profile name")
 
     subparsers.add_parser("doctor", help="check Python, agent harnesses, skills, and PATH setup")
     subparsers.add_parser(
@@ -1983,6 +2837,19 @@ ai contract:
         "install-skills",
         help="install global yt-scribe agent skills",
     )
+    init_project_parser = subparsers.add_parser(
+        "init-project",
+        help="write local yt-scribe project guidance",
+    )
+    init_project_parser.add_argument(
+        "--dir",
+        default=".",
+        help="project directory to initialize, default: current directory",
+    )
+    init_project_parser.add_argument(
+        "--profile",
+        help="optional starter profile name for .yt-scribe/config.json",
+    )
     subparsers.add_parser("lifecycle", help="print the recommended workflow")
 
     inspect_parser = subparsers.add_parser(
@@ -1990,6 +2857,11 @@ ai contract:
         help="resolve a video and list caption tracks",
     )
     inspect_parser.add_argument("url", help="YouTube URL or 11-character video ID")
+    inspect_parser.add_argument(
+        "--brief",
+        action="store_true",
+        help="print the smallest useful caption availability summary",
+    )
     add_proxy_flags(inspect_parser)
 
     fetch_parser = subparsers.add_parser("fetch", help="download the transcript without an agent")
@@ -2039,9 +2911,19 @@ ai contract:
     run_parser.add_argument("--transcript", help="also write the raw transcript to this file")
     run_parser.add_argument("--transcript-format", choices=["text", "json", "srt"], default="text")
     run_parser.add_argument(
+        "--bundle-dir",
+        help="advanced: write transcript, polished output, and metadata under this directory",
+    )
+    run_parser.add_argument(
         "--front-matter",
         action="store_true",
         help="prepend factual YAML front matter to polished markdown output",
+    )
+    run_parser.add_argument(
+        "--chunk-chars",
+        type=int,
+        default=0,
+        help="advanced: polish transcript chunks of roughly this many characters",
     )
     add_proxy_flags(run_parser)
     add_polish_flags(run_parser)
@@ -2069,8 +2951,25 @@ ai contract:
         action="store_true",
         help="prepend factual YAML front matter to polished markdown output",
     )
+    batch_parser.add_argument(
+        "--chunk-chars",
+        type=int,
+        default=0,
+        help="advanced: polish transcript chunks of roughly this many characters",
+    )
     add_proxy_flags(batch_parser)
     add_polish_flags(batch_parser)
+
+    verify_parser = subparsers.add_parser(
+        "verify",
+        help="compare polished output with a transcript artifact",
+    )
+    verify_parser.add_argument("file", help="polished output file to verify")
+    verify_parser.add_argument(
+        "--transcript",
+        required=True,
+        help="raw transcript text, timestamped text, or transcript JSON artifact",
+    )
 
     raw_parser = subparsers.add_parser("raw", help="read-only timedtext escape hatch")
     raw_parser.add_argument("url", help="YouTube URL or 11-character video ID")

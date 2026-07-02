@@ -132,6 +132,20 @@ class YtScribeTests(unittest.TestCase):
             "[00:01] hello\n[01:02] world",
         )
 
+    def test_split_transcript_chunks_uses_segment_boundaries(self):
+        transcript = {
+            "segments": [
+                {"start": 1.0, "text": "first point"},
+                {"start": 2.0, "text": "second point"},
+                {"start": 3.0, "text": "third point"},
+            ],
+        }
+
+        self.assertEqual(
+            yt_scribe.split_transcript_chunks(transcript, 25, timestamps=False),
+            ["first point\nsecond point", "third point"],
+        )
+
     def test_lifecycle_is_exposed(self):
         steps = [item["step"] for item in yt_scribe.lifecycle_steps()]
         self.assertEqual(steps, ["check", "inspect", "fetch", "polish", "run"])
@@ -155,6 +169,7 @@ class YtScribeTests(unittest.TestCase):
     def test_focus_instructions_extend_builtin_prompt(self):
         args = argparse.Namespace(
             style="summary",
+            template=None,
             focus=["Only list decisions and risks."],
             focus_file=None,
             instruction=None,
@@ -174,6 +189,7 @@ class YtScribeTests(unittest.TestCase):
     def test_timestamp_instructions_extend_builtin_prompt(self):
         args = argparse.Namespace(
             style="notes",
+            template=None,
             focus=None,
             focus_file=None,
             instruction=None,
@@ -188,9 +204,28 @@ class YtScribeTests(unittest.TestCase):
         self.assertIn("timestamp anchors", instruction.text)
         self.assertIn("Do not invent timestamps", instruction.text)
 
+    def test_template_instructions_compose_with_focus(self):
+        args = argparse.Namespace(
+            style="notes",
+            template="lecture",
+            focus=["Keep only decisions."],
+            focus_file=None,
+            instruction=None,
+            prompt_file=None,
+            timestamps=False,
+        )
+
+        instruction = yt_scribe.resolve_instruction(args, "codex")
+
+        self.assertEqual(instruction.mode, "custom")
+        self.assertEqual(instruction.sources, ["--template", "--focus"])
+        self.assertIn("lecture notes", instruction.text)
+        self.assertIn("Keep only decisions.", instruction.text)
+
     def test_replacement_instruction_conflicts_with_focus(self):
         args = argparse.Namespace(
             style="notes",
+            template=None,
             focus=["extra"],
             focus_file=None,
             instruction="Replace everything.",
@@ -320,6 +355,18 @@ class YtScribeTests(unittest.TestCase):
             proxy_config.to_requests_dict(),
             {"http": "http://cli-proxy", "https": "http://env-proxy"},
         )
+
+    def test_proxy_config_from_args_rejects_placeholder_port(self):
+        args = argparse.Namespace(
+            http_proxy=None,
+            https_proxy="http://USERNAME:PASSWORD@HOST:PORT",
+        )
+
+        with self.assertRaises(yt_scribe.CliError) as raised:
+            yt_scribe.proxy_config_from_args(args)
+
+        self.assertEqual(raised.exception.code, "invalid_proxy_config")
+        self.assertIn("numeric port", str(raised.exception))
 
     def test_http_get_reports_youtube_429_as_ip_block(self):
         error = urllib.error.HTTPError(
@@ -539,6 +586,134 @@ class YtScribeTests(unittest.TestCase):
         self.assertTrue(payload["run"]["timestamp_grounding"])
         self.assertIn("--timestamps", payload["run"]["instruction_sources"])
 
+    def test_run_with_chunk_chars_polishes_chunks_then_merges(self):
+        transcript = {
+            "video_id": "dQw4w9WgXcQ",
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "language": "en",
+            "requested_languages": ["en"],
+            "track": {"language_code": "en"},
+            "segments": [
+                {"start": 1.0, "duration": 0.5, "text": "first point"},
+                {"start": 2.0, "duration": 0.5, "text": "second point"},
+                {"start": 3.0, "duration": 0.5, "text": "third point"},
+            ],
+            "text": "first point\nsecond point\nthird point",
+        }
+        calls = []
+
+        def fake_polish(**kwargs):
+            calls.append(kwargs)
+            if len(calls) < 3:
+                return {
+                    "output_path": None,
+                    "chars": len(f"chunk {len(calls)}\n"),
+                    "harness": "codex",
+                    "text": f"chunk {len(calls)}\n",
+                }
+            self.assertIn("## Chunk 1", kwargs["transcript_text"])
+            self.assertIn("## Chunk 2", kwargs["transcript_text"])
+            return {
+                "output_path": None,
+                "chars": len("merged text\n"),
+                "harness": "codex",
+                "text": "merged text\n",
+            }
+
+        args = yt_scribe.build_parser().parse_args(
+            ["--json", "run", "dQw4w9WgXcQ", "--stdout", "--chunk-chars", "25"],
+        )
+        stdout = io.StringIO()
+
+        with (
+            patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+            patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(payload["run"]["chunking"]["chunks"], 2)
+        self.assertEqual(payload["run"]["chunking"]["merge_status"], "merged")
+
+    def test_chunked_polish_reports_chunk_failures(self):
+        def fake_polish(**kwargs):
+            if "second" in kwargs["transcript_text"]:
+                raise yt_scribe.CliError("agent failed", "agent_failed")
+            return {
+                "output_path": None,
+                "chars": len("chunk ok\n"),
+                "harness": "codex",
+                "text": "chunk ok\n",
+            }
+
+        with patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish):
+            with self.assertRaises(yt_scribe.CliError) as error:
+                yt_scribe.run_chunked_agent_polish(
+                    chunks=["first", "second"],
+                    instruction="Polish.",
+                    out_path=None,
+                    model=None,
+                    cwd=None,
+                    harness="codex",
+                    chunk_chars=25,
+                    resume=False,
+                    progress=None,
+                )
+
+        self.assertEqual(error.exception.code, "chunk_polish_failed")
+        self.assertEqual(error.exception.details["chunk_index"], 2)
+
+    def test_chunked_polish_resume_reuses_existing_chunk_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "notes.md"
+            chunk_dir = yt_scribe.chunk_artifact_dir(str(output_path))
+            assert chunk_dir is not None
+            chunk_dir.mkdir()
+            (chunk_dir / "chunk-001.md").write_text("existing chunk\n", encoding="utf-8")
+            calls = []
+
+            def fake_polish(**kwargs):
+                calls.append(kwargs)
+                if len(calls) == 1:
+                    self.assertEqual(kwargs["transcript_text"], "second")
+                    return {
+                        "output_path": yt_scribe.write_text(
+                            kwargs["out_path"],
+                            "new chunk\n",
+                        ),
+                        "chars": len("new chunk\n"),
+                        "harness": "codex",
+                        "text": "new chunk\n",
+                    }
+                self.assertIn("existing chunk", kwargs["transcript_text"])
+                self.assertIn("new chunk", kwargs["transcript_text"])
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], "merged\n"),
+                    "chars": len("merged\n"),
+                    "harness": "codex",
+                    "text": "merged\n",
+                }
+
+            with patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish):
+                result = yt_scribe.run_chunked_agent_polish(
+                    chunks=["first", "second"],
+                    instruction="Polish.",
+                    out_path=str(output_path),
+                    model=None,
+                    cwd=None,
+                    harness="codex",
+                    chunk_chars=25,
+                    resume=True,
+                    progress=None,
+                )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["chunking"]["resumed_chunks"], 1)
+        self.assertEqual(result["chunking"]["merge_status"], "merged")
+
     def test_polish_with_timestamps_reports_json_and_prompt_contract(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             transcript_path = Path(tmp_dir) / "transcript.txt"
@@ -668,6 +843,51 @@ class YtScribeTests(unittest.TestCase):
         self.assertIn("video_id: dQw4w9WgXcQ\n", stdout.getvalue())
         self.assertTrue(stdout.getvalue().endswith("polished text\n"))
 
+    def test_run_bundle_dir_writes_transcript_output_and_metadata(self):
+        transcript = {
+            "video_id": "dQw4w9WgXcQ",
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "language": "en",
+            "requested_languages": ["en"],
+            "track": {"language_code": "en"},
+            "segments": [{"start": 1.0, "duration": 0.5, "text": "hello world"}],
+            "text": "hello world",
+            "source": "youtube_transcript_api",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            args = yt_scribe.build_parser().parse_args(
+                ["--json", "run", "dQw4w9WgXcQ", "--bundle-dir", str(bundle_dir)],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(
+                    yt_scribe,
+                    "run_agent_polish",
+                    side_effect=lambda **kwargs: {
+                        "output_path": yt_scribe.write_text(kwargs["out_path"], "polished\n"),
+                        "chars": len("polished\n"),
+                        "harness": "codex",
+                        "text": "polished\n",
+                    },
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = yt_scribe.handle_args(args)
+
+            payload = json.loads(stdout.getvalue())
+            metadata = json.loads((bundle_dir / "metadata.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload["run"]["bundle"]["dir"], str(bundle_dir.resolve()))
+            self.assertTrue((bundle_dir / "transcript.txt").is_file())
+            self.assertTrue((bundle_dir / "polished.md").is_file())
+            self.assertEqual(metadata["video_id"], "dQw4w9WgXcQ")
+            self.assertEqual(metadata["instruction_sources"], ["--style"])
+
     def test_run_json_reports_requested_language_fallbacks(self):
         transcript = {
             "video_id": "dQw4w9WgXcQ",
@@ -704,6 +924,172 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(fetch.call_args.args[1], ["en", "en-GB"])
         self.assertEqual(payload["run"]["requested_languages"], ["en", "en-GB"])
         self.assertEqual(payload["run"]["language"], "en-GB")
+
+    def test_run_profile_applies_defaults_and_cli_style_override(self):
+        transcript = {
+            "video_id": "dQw4w9WgXcQ",
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "language": "sv",
+            "requested_languages": ["sv"],
+            "track": {"language_code": "sv"},
+            "segments": [{"start": 1.0, "duration": 0.5, "text": "hello world"}],
+            "text": "hello world",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch.dict(
+                os.environ,
+                {"YT_SCRIBE_CONFIG": str(Path(tmp_dir) / "config.json")},
+            ):
+                yt_scribe.write_config(
+                    {
+                        "profiles": {
+                            "research": {
+                                "style": "summary",
+                                "langs": ["sv"],
+                                "template": "lecture",
+                                "timestamps": True,
+                            }
+                        }
+                    }
+                )
+                args = yt_scribe.build_parser().parse_args(
+                    [
+                        "--json",
+                        "run",
+                        "dQw4w9WgXcQ",
+                        "--profile",
+                        "research",
+                        "--style",
+                        "clean",
+                        "--stdout",
+                    ],
+                )
+                stdout = io.StringIO()
+
+                with (
+                    patch.object(yt_scribe, "fetch_transcript", return_value=transcript) as fetch,
+                    patch.object(
+                        yt_scribe,
+                        "run_agent_polish",
+                        return_value={
+                            "output_path": None,
+                            "chars": len("polished text\n"),
+                            "harness": "codex",
+                            "text": "polished text\n",
+                        },
+                    ) as polish,
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fetch.call_args.args[1], ["sv"])
+        self.assertEqual(payload["run"]["style"], "clean")
+        self.assertTrue(payload["run"]["timestamp_grounding"])
+        self.assertIn("--template", payload["run"]["instruction_sources"])
+        self.assertIn("[00:01] hello world", polish.call_args.kwargs["transcript_text"])
+
+    def test_inspect_brief_reports_small_caption_summary(self):
+        args = yt_scribe.build_parser().parse_args(["--json", "inspect", "dQw4w9WgXcQ", "--brief"])
+        stdout = io.StringIO()
+        tracks = [
+            yt_scribe.CaptionTrack("English", "en", "https://example.test/en"),
+            yt_scribe.CaptionTrack("Swedish", "sv", "https://example.test/sv", kind="asr"),
+        ]
+
+        with (
+            patch.object(yt_scribe, "list_transcript_tracks", return_value=tracks),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["video"]["caption_tracks"], 2)
+        self.assertEqual(payload["video"]["languages"], ["en", "sv"])
+        self.assertEqual(payload["video"]["manual_languages"], ["en"])
+        self.assertEqual(payload["video"]["auto_generated_languages"], ["sv"])
+
+    def test_verify_polished_output_classifies_findings_conservatively(self):
+        transcript = (
+            "[00:01] Alice shipped 42 widgets.\n"
+            "[00:05] Strategy choices were discussed."
+        )
+        polished = (
+            "- Alice shipped 42 widgets.\n"
+            "- Bob shipped 99 widgets.\n"
+            "- The strategy is risky."
+        )
+
+        result = yt_scribe.verify_polished_output(polished, transcript)
+
+        self.assertEqual(
+            [finding["status"] for finding in result["findings"]],
+            ["supported", "unsupported", "uncertain"],
+        )
+        self.assertEqual(result["summary"]["unsupported"], 1)
+        self.assertEqual(result["findings"][0]["transcript_anchor"], "00:01")
+        self.assertEqual(result["findings"][1]["unsupported_terms"], ["Bob", "99"])
+
+    def test_verify_command_reports_stable_json_findings(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            polished_path = root / "notes.md"
+            transcript_path = root / "transcript.json"
+            polished_path.write_text(
+                "- Alice shipped 42 widgets.\n- Bob shipped 99 widgets.\n",
+                encoding="utf-8",
+            )
+            transcript_path.write_text(
+                json.dumps(
+                    {
+                        "segments": [
+                            {
+                                "start": 1.0,
+                                "duration": 0.5,
+                                "text": "Alice shipped 42 widgets.",
+                            }
+                        ],
+                        "text": "Alice shipped 42 widgets.",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = yt_scribe.build_parser().parse_args(
+                ["--json", "verify", str(polished_path), "--transcript", str(transcript_path)]
+            )
+            stdout = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout):
+                exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["verify"]["summary"]["unsupported"], 1)
+        self.assertEqual(payload["verify"]["findings"][0]["status"], "supported")
+        self.assertEqual(payload["verify"]["findings"][1]["status"], "unsupported")
+
+    def test_init_project_writes_local_guidance_only(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            args = yt_scribe.build_parser().parse_args(
+                ["--json", "init-project", "--dir", tmp_dir, "--profile", "research"]
+            )
+            stdout = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout):
+                exit_code = yt_scribe.handle_args(args)
+
+            payload = json.loads(stdout.getvalue())
+            project_dir = Path(tmp_dir) / ".yt-scribe"
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload["init_project"]["dir"], str(project_dir.resolve()))
+            self.assertTrue((project_dir / "AGENTS.md").is_file())
+            self.assertTrue((project_dir / "config.json").is_file())
+            self.assertFalse((Path(tmp_dir) / "AGENTS.md").exists())
 
     def test_fetch_writes_transcript_cache_when_cache_dir_is_set(self):
         transcript = {
@@ -854,6 +1240,161 @@ class YtScribeTests(unittest.TestCase):
         self.assertTrue(output_exists)
         self.assertEqual(manifest["items"][1]["status"], "failed")
         self.assertEqual(manifest["items"][1]["error"]["code"], "no_captions")
+
+    def test_batch_with_chunk_chars_reports_chunking_in_manifest(self):
+        def fake_load_or_fetch(url, languages, cache_dir, resume, proxy_config=None):
+            return (
+                {
+                    "video_id": "dQw4w9WgXcQ",
+                    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    "language": "en",
+                    "requested_languages": languages,
+                    "track": {"language_code": "en"},
+                    "segments": [
+                        {"start": 1.0, "duration": 0.5, "text": "first point"},
+                        {"start": 2.0, "duration": 0.5, "text": "second point"},
+                        {"start": 3.0, "duration": 0.5, "text": "third point"},
+                    ],
+                    "text": "first point\nsecond point\nthird point",
+                    "source": "youtube_transcript_api",
+                },
+                {"status": "disabled", "path": None},
+            )
+
+        def fake_polish(**kwargs):
+            if kwargs["out_path"] and kwargs["out_path"].endswith("notes.md"):
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], "merged\n"),
+                    "chars": len("merged\n"),
+                    "harness": "codex",
+                    "text": "merged\n",
+                }
+            return {
+                "output_path": yt_scribe.write_text(kwargs["out_path"], "chunk\n"),
+                "chars": len("chunk\n"),
+                "harness": "codex",
+                "text": "chunk\n",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            list_path = root / "videos.txt"
+            out_dir = root / "notes"
+            manifest_path = root / "manifest.json"
+            list_path.write_text("dQw4w9WgXcQ\n", encoding="utf-8")
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "batch",
+                    str(list_path),
+                    "--out-dir",
+                    str(out_dir),
+                    "--manifest",
+                    str(manifest_path),
+                    "--chunk-chars",
+                    "25",
+                ],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.object(yt_scribe, "load_or_fetch_transcript", side_effect=fake_load_or_fetch),
+                patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = yt_scribe.handle_args(args)
+
+            payload = json.loads(stdout.getvalue())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["batch"]["chunking"]["enabled"])
+        self.assertEqual(manifest["items"][0]["chunking"]["chunks"], 2)
+        self.assertEqual(manifest["items"][0]["chunking"]["merge_status"], "merged")
+
+    def test_expand_batch_items_expands_playlist_urls(self):
+        with patch.object(
+            yt_scribe,
+            "fetch_playlist_video_ids",
+            return_value=["dQw4w9WgXcQ", "aaaaaaaaaaa"],
+        ):
+            items = yt_scribe.expand_batch_items(
+                ["https://www.youtube.com/playlist?list=PLabc123"],
+                proxy_config=None,
+            )
+
+        self.assertEqual(
+            [item["url"] for item in items],
+            [
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+            ],
+        )
+        self.assertEqual(items[0]["playlist_id"], "PLabc123")
+
+    def test_batch_playlist_records_source_metadata(self):
+        def fake_load_or_fetch(url, languages, cache_dir, resume, proxy_config=None):
+            self.assertEqual(url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+            return (
+                {
+                    "video_id": "dQw4w9WgXcQ",
+                    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    "language": "en",
+                    "requested_languages": languages,
+                    "track": {"language_code": "en"},
+                    "segments": [{"text": "hello world"}],
+                    "text": "hello world",
+                    "source": "youtube_transcript_api",
+                },
+                {"status": "disabled", "path": None},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            list_path = root / "videos.txt"
+            out_dir = root / "notes"
+            manifest_path = root / "manifest.json"
+            playlist_url = "https://www.youtube.com/playlist?list=PLabc123"
+            list_path.write_text(f"{playlist_url}\n", encoding="utf-8")
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "batch",
+                    str(list_path),
+                    "--out-dir",
+                    str(out_dir),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.object(
+                    yt_scribe,
+                    "fetch_playlist_video_ids",
+                    return_value=["dQw4w9WgXcQ"],
+                ),
+                patch.object(yt_scribe, "load_or_fetch_transcript", side_effect=fake_load_or_fetch),
+                patch.object(
+                    yt_scribe,
+                    "run_agent_polish",
+                    side_effect=lambda **kwargs: {
+                        "output_path": yt_scribe.write_text(kwargs["out_path"], "polished\n"),
+                        "chars": len("polished\n"),
+                        "harness": "codex",
+                        "text": "polished\n",
+                    },
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = yt_scribe.handle_args(args)
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(manifest["items"][0]["playlist_url"], playlist_url)
+        self.assertEqual(manifest["items"][0]["playlist_id"], "PLabc123")
 
     def test_batch_resume_skips_existing_outputs(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
