@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .. import (
+from .._legacy import (
     chunk_artifact_dir,
     chunk_output_path,
     chunking_disabled_payload,

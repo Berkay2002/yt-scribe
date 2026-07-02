@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .. import (
+from .._legacy import (
     codex_csv_fanout_jobs,
     deep_chunk_instruction,
     deep_merge_input,

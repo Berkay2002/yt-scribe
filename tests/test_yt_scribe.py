@@ -11,13 +11,26 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import yt_scribe as package
+from yt_scribe import _legacy as legacy
 from yt_scribe import batch, cli, config, polish, runs, setup, transcripts, verify, youtube
 
 
 @contextlib.contextmanager
 def patch_cli_workflow(name, **mock_kwargs):
     replacement = Mock(**mock_kwargs)
-    targets = (cli, package, youtube, transcripts, polish, batch, runs, verify, config, setup)
+    targets = (
+        cli,
+        package,
+        legacy,
+        youtube,
+        transcripts,
+        polish,
+        batch,
+        runs,
+        verify,
+        config,
+        setup,
+    )
     with contextlib.ExitStack() as stack:
         for target in targets:
             if hasattr(target, name):
@@ -214,7 +227,7 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(steps, ["check", "inspect", "fetch", "polish", "run"])
 
     def test_builtin_style_prompts_trigger_transcript_polisher_skill(self):
-        for style in package.STYLE_INSTRUCTIONS:
+        for style in cli.STYLE_INSTRUCTIONS:
             instruction = polish.style_instruction(style, "codex")
             self.assertIn("yt-scribe-transcript-polisher", instruction)
             self.assertIn("harness/codex.md", instruction)
@@ -496,8 +509,8 @@ class YtScribeTests(unittest.TestCase):
 
         self_outer = self
         with (
-            patch.object(package, "command_path", return_value="opencode"),
-            patch.object(package.subprocess, "Popen", FakePopen),
+            patch.object(legacy, "command_path", return_value="opencode"),
+            patch.object(legacy.subprocess, "Popen", FakePopen),
         ):
             result = polish.run_agent_polish(
                 "raw transcript",
@@ -582,8 +595,8 @@ class YtScribeTests(unittest.TestCase):
 
         stderr = io.StringIO()
         with (
-            patch.object(package, "command_path", return_value="opencode"),
-            patch.object(package.subprocess, "Popen", FakePopen),
+            patch.object(legacy, "command_path", return_value="opencode"),
+            patch.object(legacy.subprocess, "Popen", FakePopen),
             contextlib.redirect_stderr(stderr),
         ):
             result = polish.run_agent_polish(
@@ -672,8 +685,8 @@ class YtScribeTests(unittest.TestCase):
 
         stderr = io.StringIO()
         with (
-            patch.object(package, "command_path", return_value="codex"),
-            patch.object(package.subprocess, "Popen", FakePopen),
+            patch.object(legacy, "command_path", return_value="codex"),
+            patch.object(legacy.subprocess, "Popen", FakePopen),
             contextlib.redirect_stderr(stderr),
         ):
             result = polish.run_agent_polish(
@@ -906,7 +919,7 @@ class YtScribeTests(unittest.TestCase):
                 "text": "chunk ok\n",
             }
 
-        with patch.object(package, "run_agent_polish", side_effect=fake_polish):
+        with patch.object(legacy, "run_agent_polish", side_effect=fake_polish):
             with self.assertRaises(package.CliError) as error:
                 polish.run_chunked_agent_polish(
                     chunks=["first", "second"],
@@ -954,7 +967,7 @@ class YtScribeTests(unittest.TestCase):
                     "text": "merged\n",
                 }
 
-            with patch.object(package, "run_agent_polish", side_effect=fake_polish):
+            with patch.object(legacy, "run_agent_polish", side_effect=fake_polish):
                 result = polish.run_chunked_agent_polish(
                     chunks=["first", "second"],
                     instruction="Polish.",

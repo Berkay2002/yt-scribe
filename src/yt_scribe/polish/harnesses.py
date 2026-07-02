@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .. import (
+from .._legacy import (
     append_tail,
     codex_final_text,
     codex_item_progress_message,

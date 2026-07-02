@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .. import (
+from .._legacy import (
     PolishInstruction,
     PolishOptions,
     custom_instruction_parts,
