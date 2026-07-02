@@ -88,33 +88,29 @@ def test_config_command_persists_default_agent_harness(tmp_path):
     assert payload["config"]["effective_agent_harness"] == "opencode"
 
 
-def test_install_skills_writes_global_agent_files(tmp_path):
+def test_install_skills_writes_global_skill_files(tmp_path):
     env = os.environ.copy()
     env["YT_SCRIBE_AGENTS_SKILLS_DIR"] = str(tmp_path / "agent-skills")
-    env["YT_SCRIBE_OPENCODE_AGENTS_DIR"] = str(tmp_path / "opencode-agents")
 
     result = run_cli("--json", "install-skills", env=env)
 
     assert result.returncode == 0
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
+    assert (tmp_path / "agent-skills" / "yt-scribe" / "SKILL.md").exists()
     assert (
         tmp_path
         / "agent-skills"
         / "yt-scribe-transcript-polisher"
         / "SKILL.md"
     ).exists()
-    assert (tmp_path / "opencode-agents" / "yt-scribe.md").exists()
-    assert (
-        tmp_path / "opencode-agents" / "yt-scribe-transcript-polisher.md"
-    ).exists()
+    assert "opencode_agents_dir" not in payload["skills"]
 
 
 def test_setup_installs_support_files_and_reports_next_command(tmp_path):
     env = os.environ.copy()
     env["PATH"] = ""
     env["YT_SCRIBE_AGENTS_SKILLS_DIR"] = str(tmp_path / "agent-skills")
-    env["YT_SCRIBE_OPENCODE_AGENTS_DIR"] = str(tmp_path / "opencode-agents")
     env["YT_SCRIBE_CONFIG"] = str(tmp_path / "config.json")
 
     result = run_cli("--json", "setup", env=env)
@@ -124,10 +120,11 @@ def test_setup_installs_support_files_and_reports_next_command(tmp_path):
     assert payload["ok"] is True
     assert payload["setup"]["next"]["run"] == "yt-scribe run <youtube-url>"
     assert payload["setup"]["doctor"]["install"]["resolved_command"] is None
+    assert (tmp_path / "agent-skills" / "yt-scribe" / "SKILL.md").exists()
     assert (
         tmp_path
         / "agent-skills"
         / "yt-scribe-transcript-polisher"
         / "SKILL.md"
     ).exists()
-    assert (tmp_path / "opencode-agents" / "yt-scribe.md").exists()
+    assert "opencode_agents_dir" not in payload["setup"]["skills"]

@@ -66,7 +66,7 @@ yt-scribe setup
 yt-scribe doctor
 ```
 
-`yt-scribe setup` copies the transcript-polisher skill to `~/.agents/skills/yt-scribe-transcript-polisher` and the OpenCode agents to OpenCode's global agents directory. This is needed when the globally installed CLI is used from projects that do not contain this repository's `.agents` or `.opencode` folders.
+`yt-scribe setup` copies the shared skills to `~/.agents/skills`. This is needed when the globally installed CLI is used from projects that do not contain this repository's `.agents` folder.
 
 `yt-scribe` uses `youtube-transcript-api` for caption access. Maintainers can install test and lint tools with:
 
@@ -229,7 +229,7 @@ Without config, `yt-scribe` uses Codex. A config default changes future `polish`
 
 `install-skills`
 
-Installs only the transcript-polisher skill and OpenCode agents into global user-level locations. Most users should run `yt-scribe setup` instead.
+Installs only the shared agent skills into `~/.agents/skills`. Most users should run `yt-scribe setup` instead.
 
 ```sh
 yt-scribe install-skills
@@ -295,12 +295,6 @@ OpenCode is available when `opencode` is on PATH and selected with `--agent-harn
 opencode run "<instruction>" --file <temp-transcript-file> --format json
 ```
 
-When the project-local OpenCode agent is available, `yt-scribe` also passes:
-
-```text
---agent yt-scribe-transcript-polisher
-```
-
 The final text is read from OpenCode JSON events. Run `yt-scribe doctor` to check whether `codex` and `opencode` are available and whether their auth commands report usable local configuration.
 
 For the default prompt, `--style` selects the output mode and `--focus` appends
@@ -313,26 +307,24 @@ There are two skills:
 - `yt-scribe`: teaches an agent how to use the CLI correctly.
 - `yt-scribe-transcript-polisher`: guides the agent started by the CLI to polish the fetched transcript.
 
-Each skill keeps Codex and OpenCode notes in separate files, so each tool sees only the details it needs.
+Both Codex and OpenCode use the shared `.agents/skills` tree. Each skill keeps Codex and OpenCode notes in separate files, so each tool sees only the details it needs.
 
 ## Plugin Skills
 
-This repository also contains plugin skills:
+This repository contains shared agent skills:
 
-- `.opencode/agents/yt-scribe.md`: OpenCode agent for using the CLI.
-- `.opencode/agents/yt-scribe-transcript-polisher.md`: OpenCode agent for polishing transcripts.
-- `skills/yt-scribe`: plugin skill for using the CLI.
-- `skills/yt-scribe/harness/codex.md`: Codex-specific CLI instructions.
-- `skills/yt-scribe/harness/opencode.md`: OpenCode-specific CLI instructions.
+- `.agents/skills/yt-scribe`: skill for using the CLI.
+- `.agents/skills/yt-scribe/harness/codex.md`: Codex-specific CLI instructions.
+- `.agents/skills/yt-scribe/harness/opencode.md`: OpenCode-specific CLI instructions.
 - `.agents/skills/yt-scribe-transcript-polisher`: skill for transcript rewriting.
 - `.agents/skills/yt-scribe-transcript-polisher/harness/codex.md`: Codex stdin polishing instructions.
 - `.agents/skills/yt-scribe-transcript-polisher/harness/opencode.md`: OpenCode attached-file polishing instructions.
 
 The split matters. One skill explains how to run the CLI correctly. The transcript-polisher skill is only for the agent started by the CLI after the transcript has already been fetched.
 
-When the CLI is installed globally, project-local `.agents` and `.opencode` folders are not automatically available in other projects. Run `yt-scribe setup` to install the skill files globally.
+When the CLI is installed globally, project-local `.agents` folders are not automatically available in other projects. Run `yt-scribe setup` to install the skill files globally.
 
-The plugin files live in this repository under `.codex-plugin/` and `skills/`.
+The plugin manifest lives in `.codex-plugin/` and points at `.agents/skills/`.
 
 ## Notes
 

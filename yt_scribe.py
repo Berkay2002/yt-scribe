@@ -31,7 +31,7 @@ AGENT_HARNESSES = ("codex", "opencode")
 CONFIG_ENV_VAR = "YT_SCRIBE_CONFIG"
 CONFIG_FILENAME = "config.json"
 AGENTS_SKILLS_DIR_ENV_VAR = "YT_SCRIBE_AGENTS_SKILLS_DIR"
-OPENCODE_AGENTS_DIR_ENV_VAR = "YT_SCRIBE_OPENCODE_AGENTS_DIR"
+DEFAULT_CACHE_DIR = Path(".yt-scribe") / "cache"
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -72,9 +72,137 @@ TRANSCRIPT_DELIVERY = {
     "codex": "stdin",
     "opencode": "an attached transcript file",
 }
-OPENCODE_POLISHER_AGENT = "yt-scribe-transcript-polisher"
 
-EMBEDDED_HARNESS_ASSETS = {
+EMBEDDED_SKILL_ASSETS = {
+    ".agents/skills/yt-scribe/SKILL.md": """---
+name: yt-scribe
+description: Use when an agent needs to fetch a YouTube transcript, inspect
+  available captions, save raw captions, or polish a transcript into notes,
+  summaries, cleaned text, or article-style prose through the installed
+  `yt-scribe` CLI.
+---
+
+# yt-scribe
+
+Use the installed `yt-scribe` CLI for YouTube transcript workflows. This skill
+teaches an agent how to use the CLI correctly.
+
+Prefer `--json` when reading command output for analysis or chaining.
+
+Read exactly one harness file for command details:
+
+- Codex: `harness/codex.md`
+- OpenCode: `harness/opencode.md`
+
+The CLI is human-first. Its default path should be the same obvious command a person would run:
+
+```sh
+yt-scribe run "<youtube-url>"
+```
+
+## Start
+
+Verify the command exists and the local harness setup is available:
+
+```sh
+yt-scribe --json doctor
+```
+
+If `yt-scribe` is missing, install and set it up from the public repository:
+
+```sh
+python -m pip install --upgrade git+https://github.com/Berkay2002/yt-scribe.git \\
+  && python -m yt_scribe setup
+```
+
+From a checkout, run `sh ./install-local.sh` on Linux or macOS, or
+`.\\install-local.ps1` on Windows. The local installers create the wrapper and
+run setup.
+
+## Workflow
+
+For a new YouTube link:
+
+```sh
+yt-scribe --json inspect "<youtube-url>"
+yt-scribe --json fetch "<youtube-url>" --lang en --out transcript.txt
+yt-scribe --json polish transcript.txt --style notes --out notes.md
+yt-scribe --json polish transcript.txt --focus "Focus on decisions and risks" --out notes.md
+```
+
+For the one-command path:
+
+```sh
+yt-scribe --json run "<youtube-url>"
+yt-scribe --json run "<youtube-url>" --focus "Keep only action items"
+```
+
+Use styles intentionally:
+
+- `notes`: structured markdown notes.
+- `summary`: concise summary with key ideas.
+- `clean`: cleaned transcript text with filler removed.
+- `article`: readable article-style prose.
+
+Use `--focus "..."` or `--focus-file instructions.md` when the user wants
+specific emphasis while keeping the normal harness prompt. Use `--instruction`
+or `--prompt-file` only when the user needs to replace the whole polishing prompt.
+
+## Safety
+
+- Use `inspect` before assuming captions exist.
+- Do not claim transcript availability until `fetch`, `inspect`, or `run` succeeds.
+- Do not bypass private, disabled, or unavailable captions.
+- Do not use `raw --body` unless high-level commands are insufficient.
+- Do not run destructive shell commands as part of this workflow.
+- Do not pass secrets in `--focus`, `--instruction`, or prompt files.
+""",
+    ".agents/skills/yt-scribe/harness/codex.md": """# Codex Harness
+
+Use this file when Codex is running the yt-scribe CLI or when the user wants the
+Codex polishing harness.
+
+`polish` and `run` use Codex by default:
+
+```sh
+yt-scribe --json run "<youtube-url>"
+yt-scribe --json polish transcript.txt --style notes --out notes.md
+```
+
+With Codex, the CLI invokes `codex exec` in read-only, ephemeral mode and passes
+the transcript through stdin. The polishing prompt asks for the
+`yt-scribe-transcript-polisher` skill from `.agents/skills` and its Codex
+instructions. The CLI writes final Codex output through `--output-last-message`,
+so prefer `--out` when the user expects a file.
+""",
+    ".agents/skills/yt-scribe/harness/opencode.md": """# OpenCode Harness
+
+Use this file when OpenCode is running the yt-scribe CLI or when the user wants
+the OpenCode polishing harness.
+
+Select OpenCode per command:
+
+```sh
+yt-scribe --json run "<youtube-url>" --agent-harness opencode
+yt-scribe --json polish transcript.txt --agent-harness opencode --style summary --out summary.md
+```
+
+Or persist it as the default:
+
+```sh
+yt-scribe config set default-agent-harness opencode
+```
+
+With OpenCode, the CLI invokes `opencode run` and attaches the transcript as a
+temp file. The polishing prompt asks for the shared
+`yt-scribe-transcript-polisher` skill from `.agents/skills` and its OpenCode
+instructions. Prefer `--out` when the user expects a file.
+""",
+    ".agents/skills/yt-scribe/agents/openai.yaml": """interface:
+  display_name: "YT Scribe"
+  short_description: "Use yt-scribe to fetch and polish YouTube transcripts."
+  default_prompt: "Turn this YouTube link into clean notes."
+""",
     ".agents/skills/yt-scribe-transcript-polisher/SKILL.md": """---
 name: yt-scribe-transcript-polisher
 description: Polish transcript text passed by yt-scribe. Do not fetch captions.
@@ -134,8 +262,7 @@ Do not mention Codex, stdin, or the polishing process in the final answer.
 """,
     ".agents/skills/yt-scribe-transcript-polisher/harness/opencode.md": """# OpenCode Harness
 
-Use this file when `yt-scribe` invokes OpenCode through `opencode run`, usually
-with `--agent yt-scribe-transcript-polisher`.
+Use this file when `yt-scribe` invokes OpenCode through `opencode run`.
 
 The transcript is attached as a temp transcript file. Read that attached transcript
 as the content to transform. Return only the polished transcript output.
@@ -146,80 +273,6 @@ Do not mention OpenCode, the attached file, or the polishing process in the fina
   display_name: "YT Scribe Transcript Polisher"
   short_description: "Polish transcript text passed through yt-scribe."
   default_prompt: "Polish this transcript into clean notes."
-""",
-    ".opencode/agents/yt-scribe.md": """---
-description: Fetch and polish YouTube transcripts through the yt-scribe CLI.
-mode: all
-permission:
-  edit: deny
-  bash:
-    "*": ask
-    "yt-scribe *": allow
-    "python -m yt_scribe *": allow
-    "python yt_scribe.py *": allow
-    "python -m pytest *": allow
-    "python -m ruff *": allow
----
-
-You are the OpenCode-facing yt-scribe agent.
-
-Use the installed `yt-scribe` CLI for YouTube transcript workflows. Prefer `--json`
-when reading command output for analysis or chaining.
-
-For OpenCode-specific command details, follow `skills/yt-scribe/harness/opencode.md`
-in this repository when it is available. The transcript polishing skill lives at
-`.agents/skills/yt-scribe-transcript-polisher`.
-
-Default workflow:
-
-```sh
-yt-scribe --json inspect "<youtube-url>"
-yt-scribe --json fetch "<youtube-url>" --lang en --out transcript.txt
-yt-scribe --json polish transcript.txt --agent-harness opencode --style notes --out notes.md
-yt-scribe --json polish transcript.txt --focus "Focus on decisions and risks" --out notes.md
-```
-
-One-command workflow:
-
-```sh
-yt-scribe --json run "<youtube-url>" --agent-harness opencode
-yt-scribe --json run "<youtube-url>" --focus "Keep only action items"
-```
-
-Do not bypass private, disabled, or unavailable captions. Do not pass secrets in
-`--focus`, `--instruction`, or prompt files.
-""",
-    ".opencode/agents/yt-scribe-transcript-polisher.md": """---
-description: Polish transcript text attached by yt-scribe.
-mode: all
-temperature: 0.1
-permission:
-  edit: deny
-  bash: deny
----
-
-You are the OpenCode transcript polisher started by yt-scribe after it fetches a
-transcript.
-
-Transform the transcript attached by `yt-scribe`. Read the attached transcript file
-as the source content. Do not fetch the video, inspect unrelated files, run shell
-commands, or call `yt-scribe`.
-
-For OpenCode-specific polish behavior, follow
-`.agents/skills/yt-scribe-transcript-polisher/harness/opencode.md` in this
-repository when it is available.
-
-Rules:
-
-- Return only the requested polished transcript output.
-- Preserve the speaker's meaning, sequence, and concrete claims.
-- Honor custom user instructions passed by `yt-scribe`. When they conflict with
-  the selected output mode, the custom instructions win unless they would require
-  adding unsupported facts.
-- Remove caption artifacts, repeated fragments, filler, obvious false starts, and timestamp residue.
-- Do not add facts, examples, citations, links, or claims that are not in the transcript.
-- Do not mention that you used an agent, a skill, OpenCode, an attached file, or a cleaning process.
-- If the transcript is empty or unusable, say that the transcript content is missing or unusable.
 """,
 }
 
@@ -444,6 +497,22 @@ def list_transcript_tracks(
     return tracks
 
 
+def normalize_languages(languages: str | list[str] | tuple[str, ...]) -> list[str]:
+    if isinstance(languages, str):
+        candidates = [languages]
+    else:
+        candidates = list(languages)
+
+    normalized: list[str] = []
+    for candidate in candidates:
+        normalized.extend(part.strip() for part in str(candidate).split(","))
+    return [language for language in normalized if language]
+
+
+def requested_languages(args: argparse.Namespace) -> list[str]:
+    return normalize_languages(args.langs or args.lang)
+
+
 def choose_track(tracks: list[CaptionTrack], lang: str) -> CaptionTrack:
     lang = lang.lower()
     exact = [track for track in tracks if track.language_code.lower() == lang]
@@ -464,6 +533,37 @@ def choose_track(tracks: list[CaptionTrack], lang: str) -> CaptionTrack:
         + ", ".join(track.language_code for track in tracks),
         "language_not_available",
         {"available_languages": [track.language_code for track in tracks]},
+    )
+
+
+def choose_track_from_languages(
+    tracks: list[CaptionTrack],
+    languages: str | list[str] | tuple[str, ...],
+) -> tuple[CaptionTrack, list[str]]:
+    requested = normalize_languages(languages)
+    if not requested:
+        raise CliError("At least one caption language is required", "language_required")
+
+    last_error: CliError | None = None
+    for language in requested:
+        try:
+            return choose_track(tracks, language), requested
+        except CliError as exc:
+            last_error = exc
+
+    available = [track.language_code for track in tracks]
+    message = (
+        "No caption track matched requested languages "
+        f"{', '.join(requested)}. Available: {', '.join(available)}"
+    )
+    raise CliError(
+        message,
+        "language_not_available",
+        {
+            "requested_languages": requested,
+            "available_languages": available,
+            **(last_error.details if last_error else {}),
+        },
     )
 
 
@@ -513,13 +613,13 @@ def parse_xml_caption(payload: bytes) -> list[dict[str, Any]]:
 
 def fetch_transcript(
     url_or_id: str,
-    lang: str,
+    lang: str | list[str],
     api: YouTubeTranscriptApi | None = None,
 ) -> dict[str, Any]:
     video_id = extract_video_id(url_or_id)
     api = api or YouTubeTranscriptApi()
     tracks = list_transcript_tracks(video_id, api)
-    track = choose_track(tracks, lang)
+    track, languages = choose_track_from_languages(tracks, lang)
 
     try:
         fetched = api.fetch(video_id, languages=[track.language_code])
@@ -548,6 +648,7 @@ def fetch_transcript(
         "video_id": video_id,
         "url": canonical_watch_url(video_id),
         "language": track.language_code,
+        "requested_languages": languages,
         "track": track.public_dict(),
         "segments": segments,
         "text": text,
@@ -578,6 +679,61 @@ def render_transcript(transcript: dict[str, Any], output_format: str) -> str:
     return transcript["text"] + "\n"
 
 
+def cache_dir_from_args(args: argparse.Namespace) -> Path | None:
+    if getattr(args, "cache_dir", None):
+        return Path(args.cache_dir).expanduser().resolve()
+    if getattr(args, "resume", False):
+        return DEFAULT_CACHE_DIR.resolve()
+    return None
+
+
+def transcript_cache_path(cache_dir: Path, video_id: str, language: str) -> Path:
+    safe_language = re.sub(r"[^A-Za-z0-9_.-]+", "_", language)
+    return cache_dir / f"{video_id}-{safe_language}.json"
+
+
+def write_transcript_cache(cache_dir: Path | str, transcript: dict[str, Any]) -> Path:
+    cache_root = Path(cache_dir).expanduser().resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    path = transcript_cache_path(cache_root, transcript["video_id"], transcript["language"])
+    path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def read_transcript_cache(
+    cache_dir: Path | str,
+    video_id: str,
+    languages: list[str],
+) -> tuple[dict[str, Any], Path] | None:
+    cache_root = Path(cache_dir).expanduser().resolve()
+    for language in languages:
+        path = transcript_cache_path(cache_root, video_id, language)
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8")), path
+    return None
+
+
+def load_or_fetch_transcript(
+    url_or_id: str,
+    languages: list[str],
+    cache_dir: Path | None,
+    resume: bool,
+) -> tuple[dict[str, Any], dict[str, str | None]]:
+    video_id = extract_video_id(url_or_id)
+    if cache_dir and resume:
+        cached = read_transcript_cache(cache_dir, video_id, languages)
+        if cached:
+            transcript, path = cached
+            return transcript, {"status": "hit", "path": str(path)}
+
+    transcript = fetch_transcript(url_or_id, languages)
+    if cache_dir:
+        path = write_transcript_cache(cache_dir, transcript)
+        status = "written" if not resume else "miss_written"
+        return transcript, {"status": status, "path": str(path)}
+    return transcript, {"status": "disabled", "path": None}
+
+
 def write_text(path: str | None, text: str) -> str | None:
     if not path:
         return None
@@ -585,6 +741,73 @@ def write_text(path: str | None, text: str) -> str | None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
     return str(target)
+
+
+def front_matter_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    text = str(value)
+    if not text:
+        return '""'
+    if re.search(r"[:#\n\r\[\]{}]", text):
+        return json.dumps(text, ensure_ascii=False)
+    return text
+
+
+def render_front_matter(data: dict[str, Any]) -> str:
+    lines = ["---"]
+    for key, value in data.items():
+        if isinstance(value, list):
+            lines.append(f"{key}:")
+            if value:
+                lines.extend(f"  - {front_matter_scalar(item)}" for item in value)
+            else:
+                lines.append("  []")
+        else:
+            lines.append(f"{key}: {front_matter_scalar(value)}")
+    lines.append("---")
+    return "\n".join(lines) + "\n\n"
+
+
+def run_front_matter(
+    transcript: dict[str, Any],
+    style: str,
+    instruction: PolishInstruction,
+    harness: str,
+) -> str:
+    track = transcript.get("track") or {}
+    return render_front_matter(
+        {
+            "video_id": transcript.get("video_id"),
+            "url": transcript.get("url"),
+            "language": transcript.get("language"),
+            "caption_name": track.get("name"),
+            "caption_auto_generated": track.get("auto_generated"),
+            "segments": len(transcript.get("segments") or []),
+            "transcript_chars": len(transcript.get("text") or ""),
+            "style": style,
+            "instruction_mode": instruction.mode,
+            "instruction_sources": instruction.sources,
+            "agent_harness": harness,
+        }
+    )
+
+
+def apply_output_prefix(result: dict[str, Any], prefix: str) -> dict[str, Any]:
+    if not prefix:
+        return result
+
+    if result["output_path"]:
+        path = Path(result["output_path"])
+        final_text = prefix + path.read_text(encoding="utf-8")
+        path.write_text(final_text, encoding="utf-8")
+    else:
+        final_text = prefix + result["text"]
+        result = {**result, "text": final_text}
+
+    return {**result, "chars": len(final_text)}
 
 
 def next_available_path(path: Path) -> Path:
@@ -607,6 +830,20 @@ def default_run_output_path(video_id: str, style: str) -> Path:
 def default_polish_output_path(input_path: str, style: str) -> Path:
     source = Path(input_path).expanduser()
     return next_available_path(Path(f"{source.stem}-{style}.md"))
+
+
+def batch_output_path(out_dir: str | Path, video_id: str, style: str) -> Path:
+    return Path(out_dir).expanduser().resolve() / f"yt-scribe-{video_id}-{style}.md"
+
+
+def read_batch_urls(path: str | Path) -> list[str]:
+    source = Path(path).expanduser()
+    urls = []
+    for line in source.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            urls.append(stripped)
+    return urls
 
 
 def command_path(name: str) -> str | None:
@@ -650,38 +887,11 @@ def command_output(command: list[str]) -> str | None:
     return output or None
 
 
-def opencode_agent_available(agent_name: str, cwd: str | None = None) -> bool:
-    start = Path(cwd).expanduser().resolve() if cwd else Path.cwd().resolve()
-    for path in [start, *start.parents]:
-        if (path / ".opencode" / "agents" / f"{agent_name}.md").is_file():
-            return True
-    if (opencode_agents_dir() / f"{agent_name}.md").is_file():
-        return True
-    return False
-
-
 def agents_skills_dir() -> Path:
     override = os.environ.get(AGENTS_SKILLS_DIR_ENV_VAR)
     if override:
         return Path(override).expanduser().resolve()
     return Path.home() / ".agents" / "skills"
-
-
-def opencode_config_dir() -> Path:
-    output = command_output(["opencode", "debug", "paths"]) if command_path("opencode") else None
-    if output:
-        for line in output.splitlines():
-            parts = line.split(maxsplit=1)
-            if len(parts) == 2 and parts[0] == "config":
-                return Path(parts[1]).expanduser().resolve()
-    return Path.home() / ".config" / "opencode"
-
-
-def opencode_agents_dir() -> Path:
-    override = os.environ.get(OPENCODE_AGENTS_DIR_ENV_VAR)
-    if override:
-        return Path(override).expanduser().resolve()
-    return opencode_config_dir() / "agents"
 
 
 def source_asset_path(relative_path: str) -> Path | None:
@@ -693,13 +903,22 @@ def asset_content(relative_path: str) -> str:
     source = source_asset_path(relative_path)
     if source:
         return source.read_text(encoding="utf-8")
-    return EMBEDDED_HARNESS_ASSETS[relative_path]
+    return EMBEDDED_SKILL_ASSETS[relative_path]
 
 
-def harness_asset_targets() -> dict[str, Path]:
+def skill_asset_targets() -> dict[str, Path]:
     skills_dir = agents_skills_dir()
-    opencode_dir = opencode_agents_dir()
     return {
+        ".agents/skills/yt-scribe/SKILL.md": skills_dir / "yt-scribe" / "SKILL.md",
+        ".agents/skills/yt-scribe/harness/codex.md": (
+            skills_dir / "yt-scribe" / "harness" / "codex.md"
+        ),
+        ".agents/skills/yt-scribe/harness/opencode.md": (
+            skills_dir / "yt-scribe" / "harness" / "opencode.md"
+        ),
+        ".agents/skills/yt-scribe/agents/openai.yaml": (
+            skills_dir / "yt-scribe" / "agents" / "openai.yaml"
+        ),
         ".agents/skills/yt-scribe-transcript-polisher/SKILL.md": (
             skills_dir / "yt-scribe-transcript-polisher" / "SKILL.md"
         ),
@@ -712,16 +931,12 @@ def harness_asset_targets() -> dict[str, Path]:
         ".agents/skills/yt-scribe-transcript-polisher/agents/openai.yaml": (
             skills_dir / "yt-scribe-transcript-polisher" / "agents" / "openai.yaml"
         ),
-        ".opencode/agents/yt-scribe.md": opencode_dir / "yt-scribe.md",
-        ".opencode/agents/yt-scribe-transcript-polisher.md": (
-            opencode_dir / "yt-scribe-transcript-polisher.md"
-        ),
     }
 
 
 def install_skills() -> dict[str, Any]:
     installed = []
-    for relative_path, target in harness_asset_targets().items():
+    for relative_path, target in skill_asset_targets().items():
         target.parent.mkdir(parents=True, exist_ok=True)
         content = asset_content(relative_path)
         target.write_text(content, encoding="utf-8")
@@ -734,7 +949,6 @@ def install_skills() -> dict[str, Any]:
         )
     return {
         "agents_skills_dir": str(agents_skills_dir()),
-        "opencode_agents_dir": str(opencode_agents_dir()),
         "installed": installed,
     }
 
@@ -751,10 +965,9 @@ def setup_payload() -> dict[str, Any]:
 
 
 def skills_payload() -> dict[str, Any]:
-    targets = harness_asset_targets()
+    targets = skill_asset_targets()
     return {
         "agents_skills_dir": str(agents_skills_dir()),
-        "opencode_agents_dir": str(opencode_agents_dir()),
         "targets": {
             relative_path: {
                 "path": str(target),
@@ -1024,8 +1237,6 @@ def run_opencode_polish(
             "--format",
             "json",
         )
-        if opencode_agent_available(OPENCODE_POLISHER_AGENT, cwd):
-            command.extend(["--agent", OPENCODE_POLISHER_AGENT])
         if cwd:
             command.extend(["--dir", str(Path(cwd).expanduser().resolve())])
         if model:
@@ -1227,7 +1438,6 @@ def handle_args(args: argparse.Namespace) -> int:
         text = (
             f"Installed yt-scribe support files:\n"
             f"  agent skills: {payload['setup']['skills']['agents_skills_dir']}\n"
-            f"  OpenCode agents: {payload['setup']['skills']['opencode_agents_dir']}\n"
             f"Agent harnesses:\n"
             f"  default: {doctor['agent_harness']['default']}\n"
             f"  codex: {'found' if harnesses['codex']['available'] else 'not found'}\n"
@@ -1244,7 +1454,6 @@ def handle_args(args: argparse.Namespace) -> int:
         text = (
             f"Installed skills:\n"
             f"  agent skills: {payload['skills']['agents_skills_dir']}\n"
-            f"  OpenCode agents: {payload['skills']['opencode_agents_dir']}\n"
         )
         emit(payload, args.json, text)
         return 0
@@ -1305,7 +1514,12 @@ def handle_args(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "fetch":
-        transcript = fetch_transcript(args.url, args.lang)
+        transcript, cache = load_or_fetch_transcript(
+            args.url,
+            requested_languages(args),
+            cache_dir_from_args(args),
+            args.resume,
+        )
         rendered = render_transcript(transcript, args.format)
         output_path = write_text(args.out, rendered)
         payload = {
@@ -1314,11 +1528,13 @@ def handle_args(args: argparse.Namespace) -> int:
                 "video_id": transcript["video_id"],
                 "url": transcript["url"],
                 "language": transcript["language"],
+                "requested_languages": transcript["requested_languages"],
                 "track": transcript["track"],
                 "segments": len(transcript["segments"]),
                 "chars": len(transcript["text"]),
                 "format": args.format,
                 "output_path": output_path,
+                "cache": cache,
             },
         }
         if args.json:
@@ -1375,7 +1591,12 @@ def handle_args(args: argparse.Namespace) -> int:
     if args.command == "run":
         progress = ProgressReporter(not args.json)
         progress.message(f"Fetching transcript for {extract_video_id(args.url)}")
-        transcript = fetch_transcript(args.url, args.lang)
+        transcript, cache = load_or_fetch_transcript(
+            args.url,
+            requested_languages(args),
+            cache_dir_from_args(args),
+            args.resume,
+        )
         segment_count = len(transcript["segments"])
         segment_word = "segment" if segment_count == 1 else "segments"
         progress.message(
@@ -1406,12 +1627,21 @@ def handle_args(args: argparse.Namespace) -> int:
             harness=harness,
             progress=progress,
         )
+        if args.front_matter:
+            result = apply_output_prefix(
+                result,
+                run_front_matter(transcript, args.style, instruction, result["harness"]),
+            )
         payload = {
             "ok": True,
             "run": {
                 "video_id": transcript["video_id"],
                 "url": transcript["url"],
                 "language": transcript["language"],
+                "requested_languages": transcript.get(
+                    "requested_languages",
+                    requested_languages(args),
+                ),
                 "segments": len(transcript["segments"]),
                 "style": args.style,
                 "instruction_mode": instruction.mode,
@@ -1420,6 +1650,8 @@ def handle_args(args: argparse.Namespace) -> int:
                 "transcript_path": transcript_path,
                 "output_path": result["output_path"],
                 "chars": result["chars"],
+                "front_matter": args.front_matter,
+                "cache": cache,
             },
         }
         if args.json:
@@ -1429,6 +1661,107 @@ def handle_args(args: argparse.Namespace) -> int:
         else:
             emit(payload, False, result["text"])
         return 0
+
+    if args.command == "batch":
+        progress = ProgressReporter(not args.json)
+        urls = read_batch_urls(args.file)
+        out_dir = Path(args.out_dir).expanduser().resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = Path(args.manifest).expanduser().resolve()
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        items: list[dict[str, Any]] = []
+        languages = requested_languages(args)
+        cache_dir = cache_dir_from_args(args)
+        harness = selected_agent_harness(args)
+        instruction = resolve_instruction(args, harness)
+
+        for index, url in enumerate(urls, start=1):
+            progress.message(f"Batch item {index}/{len(urls)}: {url}")
+            try:
+                video_id = extract_video_id(url)
+                output_path = batch_output_path(out_dir, video_id, args.style)
+                if args.resume and output_path.is_file():
+                    items.append(
+                        {
+                            "url": url,
+                            "video_id": video_id,
+                            "status": "skipped",
+                            "output_path": str(output_path),
+                            "reason": "output_exists",
+                        }
+                    )
+                    continue
+
+                transcript, cache = load_or_fetch_transcript(
+                    url,
+                    languages,
+                    cache_dir,
+                    args.resume,
+                )
+                output_path = batch_output_path(out_dir, transcript["video_id"], args.style)
+                result = run_agent_polish(
+                    transcript_text=limit_text(transcript["text"], args.max_chars),
+                    instruction=instruction.text,
+                    out_path=str(output_path),
+                    model=args.model,
+                    cwd=args.cd,
+                    harness=harness,
+                    progress=progress,
+                )
+                if args.front_matter:
+                    result = apply_output_prefix(
+                        result,
+                        run_front_matter(transcript, args.style, instruction, result["harness"]),
+                    )
+                items.append(
+                    {
+                        "url": transcript["url"],
+                        "video_id": transcript["video_id"],
+                        "status": "succeeded",
+                        "language": transcript["language"],
+                        "requested_languages": transcript.get("requested_languages", languages),
+                        "agent_harness": result["harness"],
+                        "output_path": result["output_path"],
+                        "transcript_path": None,
+                        "chars": result["chars"],
+                        "cache": cache,
+                    }
+                )
+            except CliError as exc:
+                items.append(
+                    {
+                        "url": url,
+                        "status": "failed",
+                        "error": {
+                            "code": exc.code,
+                            "message": str(exc),
+                            **exc.details,
+                        },
+                    }
+                )
+
+        succeeded = sum(1 for item in items if item["status"] == "succeeded")
+        failed = sum(1 for item in items if item["status"] == "failed")
+        skipped = sum(1 for item in items if item["status"] == "skipped")
+        manifest = {
+            "ok": failed == 0,
+            "source_path": str(Path(args.file).expanduser().resolve()),
+            "out_dir": str(out_dir),
+            "manifest_path": str(manifest_path),
+            "style": args.style,
+            "requested_languages": languages,
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+            "items": items,
+        }
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        payload = {"ok": failed == 0, "batch": manifest}
+        emit(payload, args.json, f"Wrote batch manifest to {manifest_path}\n")
+        return 0 if failed == 0 else 1
 
     if args.command == "raw":
         video_id = extract_video_id(args.url)
@@ -1551,7 +1884,7 @@ ai contract:
     )
     subparsers.add_parser(
         "install-skills",
-        help="install global yt-scribe skills and OpenCode agents",
+        help="install global yt-scribe agent skills",
     )
     subparsers.add_parser("lifecycle", help="print the recommended workflow")
 
@@ -1564,6 +1897,16 @@ ai contract:
     fetch_parser = subparsers.add_parser("fetch", help="download the transcript without an agent")
     fetch_parser.add_argument("url", help="YouTube URL or 11-character video ID")
     fetch_parser.add_argument("--lang", default="en", help="caption language code, default: en")
+    fetch_parser.add_argument(
+        "--langs",
+        help="ordered comma-separated caption language fallback list",
+    )
+    fetch_parser.add_argument("--cache-dir", help="advanced: transcript cache directory")
+    fetch_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="advanced: reuse a cached transcript when available",
+    )
     fetch_parser.add_argument("--format", choices=["text", "json", "srt"], default="text")
     fetch_parser.add_argument("--out", help="write transcript to this file")
 
@@ -1584,9 +1927,49 @@ ai contract:
     )
     run_parser.add_argument("url", help="YouTube URL or 11-character video ID")
     run_parser.add_argument("--lang", default="en", help="caption language code, default: en")
+    run_parser.add_argument(
+        "--langs",
+        help="ordered comma-separated caption language fallback list",
+    )
+    run_parser.add_argument("--cache-dir", help="advanced: transcript cache directory")
+    run_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="advanced: reuse a cached transcript when available",
+    )
     run_parser.add_argument("--transcript", help="also write the raw transcript to this file")
     run_parser.add_argument("--transcript-format", choices=["text", "json", "srt"], default="text")
+    run_parser.add_argument(
+        "--front-matter",
+        action="store_true",
+        help="prepend factual YAML front matter to polished markdown output",
+    )
     add_polish_flags(run_parser)
+
+    batch_parser = subparsers.add_parser(
+        "batch",
+        help="advanced: process a plain text list of YouTube URLs",
+    )
+    batch_parser.add_argument("file", help="plain text file with one YouTube URL or ID per line")
+    batch_parser.add_argument("--out-dir", required=True, help="directory for polished outputs")
+    batch_parser.add_argument("--manifest", required=True, help="write batch manifest JSON here")
+    batch_parser.add_argument("--lang", default="en", help="caption language code, default: en")
+    batch_parser.add_argument(
+        "--langs",
+        help="ordered comma-separated caption language fallback list",
+    )
+    batch_parser.add_argument("--cache-dir", help="advanced: transcript cache directory")
+    batch_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="advanced: skip existing outputs and reuse cached transcripts",
+    )
+    batch_parser.add_argument(
+        "--front-matter",
+        action="store_true",
+        help="prepend factual YAML front matter to polished markdown output",
+    )
+    add_polish_flags(batch_parser)
 
     raw_parser = subparsers.add_parser("raw", help="read-only timedtext escape hatch")
     raw_parser.add_argument("url", help="YouTube URL or 11-character video ID")

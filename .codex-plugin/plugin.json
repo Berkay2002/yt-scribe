@@ -5,7 +5,7 @@
   "author": {
     "name": "Berkay"
   },
-  "skills": "./skills/",
+  "skills": "./.agents/skills/",
   "interface": {
     "displayName": "YT Scribe",
     "shortDescription": "Fetch and polish YouTube transcripts.",

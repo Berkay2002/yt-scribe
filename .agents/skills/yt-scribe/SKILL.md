@@ -1,11 +1,15 @@
 ---
 name: yt-scribe
-description: Use when an agent needs to fetch a YouTube transcript, inspect available captions, save raw captions, or polish a transcript into notes, summaries, cleaned text, or article-style prose through the installed `yt-scribe` CLI.
+description: Use when an agent needs to fetch a YouTube transcript, inspect
+  available captions, save raw captions, or polish a transcript into notes,
+  summaries, cleaned text, or article-style prose through the installed
+  `yt-scribe` CLI.
 ---
 
 # yt-scribe
 
-Use the installed `yt-scribe` CLI for YouTube transcript workflows. This skill teaches an agent how to use the CLI correctly.
+Use the installed `yt-scribe` CLI for YouTube transcript workflows. This skill
+teaches an agent how to use the CLI correctly.
 
 Prefer `--json` when reading command output for analysis or chaining.
 
@@ -31,10 +35,13 @@ yt-scribe --json doctor
 If `yt-scribe` is missing, install and set it up from the public repository:
 
 ```sh
-python -m pip install --upgrade git+https://github.com/Berkay2002/yt-scribe.git && python -m yt_scribe setup
+python -m pip install --upgrade git+https://github.com/Berkay2002/yt-scribe.git \
+  && python -m yt_scribe setup
 ```
 
-From a checkout, run `sh ./install-local.sh` on Linux or macOS, or `.\install-local.ps1` on Windows. The local installers create the wrapper and run setup.
+From a checkout, run `sh ./install-local.sh` on Linux or macOS, or
+`.\install-local.ps1` on Windows. The local installers create the wrapper and
+run setup.
 
 ## Workflow
 
