@@ -9,6 +9,12 @@ Use the installed `yt-scribe` CLI for YouTube transcript workflows. This skill i
 
 Prefer `--json` when reading command output for analysis or chaining.
 
+The CLI is human-first. Its default path should be the same obvious command a person would run:
+
+```powershell
+yt-scribe run "<youtube-url>"
+```
+
 ## Start
 
 Verify the command exists and the local Codex dependency is available:
@@ -32,7 +38,7 @@ yt-scribe --json polish transcript.txt --style notes --out notes.md
 For the one-command path:
 
 ```powershell
-yt-scribe --json run "<youtube-url>" --lang en --style notes --transcript transcript.txt --out notes.md
+yt-scribe --json run "<youtube-url>"
 ```
 
 Use styles intentionally:
@@ -62,7 +68,7 @@ yt-scribe --json inspect "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
 ```powershell
-yt-scribe --json run "https://www.youtube.com/watch?v=VIDEO_ID" --style notes --transcript transcript.txt --out notes.md
+yt-scribe --json run "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
 ```powershell

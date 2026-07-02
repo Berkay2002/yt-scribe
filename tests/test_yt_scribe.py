@@ -90,6 +90,14 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(transcript["text"], "hello world")
         self.assertEqual(transcript["segments"][0]["start"], 1.234)
 
+    def test_default_run_output_path_is_human_first_and_unique(self):
+        first = yt_scribe.default_run_output_path("dQw4w9WgXcQ", "notes")
+        self.assertEqual(first.name, "yt-scribe-dQw4w9WgXcQ-notes.md")
+
+    def test_default_polish_output_path_uses_input_stem(self):
+        first = yt_scribe.default_polish_output_path("transcript.txt", "summary")
+        self.assertEqual(first.name, "transcript-summary.md")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -377,6 +377,28 @@ def write_text(path: str | None, text: str) -> str | None:
     return str(target)
 
 
+def next_available_path(path: Path) -> Path:
+    path = path.expanduser()
+    if not path.exists():
+        return path
+
+    for index in range(2, 10_000):
+        candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+
+    raise CliError(f"Could not find an available filename near {path}", "output_path_exhausted")
+
+
+def default_run_output_path(video_id: str, style: str) -> Path:
+    return next_available_path(Path(f"yt-scribe-{video_id}-{style}.md"))
+
+
+def default_polish_output_path(input_path: str, style: str) -> Path:
+    source = Path(input_path).expanduser()
+    return next_available_path(Path(f"{source.stem}-{style}.md"))
+
+
 def command_path(name: str) -> str | None:
     return shutil.which(name)
 
@@ -455,11 +477,8 @@ def lifecycle_steps() -> list[dict[str, str]]:
         },
         {
             "step": "run",
-            "command": (
-                "yt-scribe run <youtube-url> --style notes "
-                "--transcript transcript.txt --out notes.md"
-            ),
-            "purpose": "Fetch and polish in one command.",
+            "command": "yt-scribe run <youtube-url>",
+            "purpose": "Fetch and polish into a notes markdown file.",
         },
     ]
 
@@ -622,10 +641,15 @@ def handle_args(args: argparse.Namespace) -> int:
     if args.command == "polish":
         transcript_text = Path(args.file).expanduser().read_text(encoding="utf-8")
         transcript_text = limit_text(transcript_text, args.max_chars)
+        out_path = (
+            args.out
+            if args.stdout
+            else args.out or str(default_polish_output_path(args.file, args.style))
+        )
         result = run_codex_polish(
             transcript_text,
             read_instruction(args),
-            args.out,
+            out_path,
             args.model,
             args.cd,
         )
@@ -651,10 +675,15 @@ def handle_args(args: argparse.Namespace) -> int:
         rendered = render_transcript(transcript, args.transcript_format)
         transcript_path = write_text(args.transcript, rendered)
         transcript_text = limit_text(transcript["text"], args.max_chars)
+        out_path = (
+            args.out
+            if args.stdout
+            else args.out or str(default_run_output_path(transcript["video_id"], args.style))
+        )
         result = run_codex_polish(
             transcript_text,
             read_instruction(args),
-            args.out,
+            out_path,
             args.model,
             args.cd,
         )
@@ -711,6 +740,11 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
         help="Codex output style, default: notes",
     )
     parser.add_argument("--out", help="write polished output to this file")
+    parser.add_argument(
+        "--stdout",
+        action="store_true",
+        help="print polished output instead of writing a file",
+    )
     parser.add_argument("--instruction", help="replace the built-in Codex prompt")
     parser.add_argument("--prompt-file", help="read the Codex prompt from a file")
     parser.add_argument("--model", help="optional codex exec model override")
@@ -724,7 +758,7 @@ def build_parser() -> argparse.ArgumentParser:
   2. yt-scribe inspect <youtube-url>
   3. yt-scribe fetch <youtube-url> --out transcript.txt
   4. yt-scribe polish transcript.txt --style notes --out notes.md
-  5. yt-scribe run <youtube-url> --transcript transcript.txt --out notes.md
+  5. yt-scribe run <youtube-url>
 
 ai contract:
   Put --json before the command for stable machine-readable output.
@@ -732,7 +766,7 @@ ai contract:
 """
     parser = argparse.ArgumentParser(
         prog=COMMAND_NAME,
-        description="Fetch YouTube transcripts and polish them with codex exec.",
+        description="Human-first CLI for turning YouTube links into Codex-polished notes.",
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -762,7 +796,14 @@ ai contract:
     polish_parser.add_argument("file", help="transcript file to polish")
     add_polish_flags(polish_parser)
 
-    run_parser = subparsers.add_parser("run", help="fetch and polish in one command")
+    run_parser = subparsers.add_parser(
+        "run",
+        help="fetch and polish in one command",
+        description=(
+            "Fetch a YouTube transcript and write notes to "
+            "yt-scribe-<video-id>-notes.md by default."
+        ),
+    )
     run_parser.add_argument("url", help="YouTube URL or 11-character video ID")
     run_parser.add_argument("--lang", default="en", help="caption language code, default: en")
     run_parser.add_argument("--transcript", help="also write the raw transcript to this file")

@@ -6,10 +6,12 @@
 
 Turn a YouTube link into a transcript, then ask Codex to polish it into readable notes, summaries, cleaned text, or article-style prose.
 
-`yt-scribe` is built for two audiences:
+`yt-scribe` is human-first software that can also be driven by Codex agents:
 
-- Humans who want a simple command that produces useful writing from a video.
-- AI agents that need stable JSON, explicit lifecycle steps, and small composable commands.
+- You can run one obvious command and get a useful notes file.
+- Codex can use the same CLI with stable JSON, explicit lifecycle steps, and composable commands.
+
+Use it yourself from the terminal, or let Codex use it as an agent tool.
 
 It uses public YouTube caption tracks when they are available through `youtube-transcript-api`. It does not download video or audio. Polishing is done locally through `codex exec`, so it reuses your existing Codex CLI authentication.
 
@@ -44,13 +46,15 @@ pip install -e .[dev]
 Fetch and polish a video in one command:
 
 ```powershell
-yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID" --style notes --out notes.md
+yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
+
+By default this creates `yt-scribe-VIDEO_ID-notes.md` in the current directory.
 
 Keep the raw transcript too:
 
 ```powershell
-yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID" --transcript transcript.txt --out notes.md
+yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID" --transcript transcript.txt
 ```
 
 Download only the transcript:
@@ -74,7 +78,7 @@ yt-scribe doctor
 yt-scribe inspect "<youtube-url>"
 yt-scribe fetch "<youtube-url>" --out transcript.txt
 yt-scribe polish transcript.txt --style notes --out notes.md
-yt-scribe run "<youtube-url>" --transcript transcript.txt --out notes.md
+yt-scribe run "<youtube-url>"
 ```
 
 Run this any time to print the same lifecycle from the CLI:
@@ -121,7 +125,10 @@ yt-scribe polish transcript.txt --style article --out article.md
 Fetches the transcript and polishes it in one command.
 
 ```powershell
-yt-scribe run "<url>" --style notes --transcript transcript.txt --out notes.md
+yt-scribe run "<url>"
+yt-scribe run "<url>" --style summary
+yt-scribe run "<url>" --stdout
+yt-scribe run "<url>" --transcript transcript.txt --out notes.md
 ```
 
 `raw <url>`
@@ -140,7 +147,7 @@ Put `--json` before the command:
 yt-scribe --json doctor
 yt-scribe --json inspect "<url>"
 yt-scribe --json fetch "<url>" --out transcript.txt
-yt-scribe --json run "<url>" --style notes --out notes.md
+yt-scribe --json run "<url>"
 ```
 
 Successful commands return:
