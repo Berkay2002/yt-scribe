@@ -32,11 +32,13 @@ DEFAULT_AGENT_HARNESS = "codex"
 AGENT_HARNESSES = ("codex", "opencode")
 CONFIG_ENV_VAR = "YT_SCRIBE_CONFIG"
 CONFIG_FILENAME = "config.json"
+DATA_DIR_ENV_VAR = "YT_SCRIBE_DATA_DIR"
 AGENTS_SKILLS_DIR_ENV_VAR = "YT_SCRIBE_AGENTS_SKILLS_DIR"
 HTTP_PROXY_ENV_VAR = "YT_SCRIBE_HTTP_PROXY"
 HTTPS_PROXY_ENV_VAR = "YT_SCRIBE_HTTPS_PROXY"
 DEFAULT_CACHE_DIR = Path(".yt-scribe") / "cache"
 PROJECT_CONFIG = Path(".yt-scribe") / CONFIG_FILENAME
+RUN_REGISTRY_FILENAME = "registry.json"
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 DEEP_WORKFLOW_DURATION_THRESHOLD_SECONDS = 45 * 60
 RUN_WORKFLOWS = ("auto", "quick", "deep")
@@ -566,6 +568,14 @@ def extract_video_duration_seconds(player_response: dict[str, Any]) -> int | Non
     return duration if duration >= 0 else None
 
 
+def extract_video_title(player_response: dict[str, Any]) -> str | None:
+    details = player_response.get("videoDetails")
+    if not isinstance(details, dict):
+        return None
+    title = str(details.get("title") or "").strip()
+    return title or None
+
+
 def fetch_video_duration_seconds(
     video_id: str,
     proxy_config: GenericProxyConfig | None = None,
@@ -575,6 +585,17 @@ def fetch_video_duration_seconds(
     except (CliError, json.JSONDecodeError):
         return None
     return extract_video_duration_seconds(player_response)
+
+
+def fetch_video_title(
+    video_id: str,
+    proxy_config: GenericProxyConfig | None = None,
+) -> str | None:
+    try:
+        player_response = fetch_watch_player_response(video_id, proxy_config)
+    except (CliError, json.JSONDecodeError):
+        return None
+    return extract_video_title(player_response)
 
 
 def select_run_workflow(
@@ -1552,6 +1573,213 @@ def write_bundle_metadata(path: str, data: dict[str, Any]) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(target)
+
+
+def data_dir(path: str | Path | None = None) -> Path:
+    if path is not None:
+        return Path(path).expanduser().resolve()
+    override = os.environ.get(DATA_DIR_ENV_VAR)
+    if override:
+        return Path(override).expanduser().resolve()
+    if sys.platform == "win32" and os.environ.get("APPDATA"):
+        return Path(os.environ["APPDATA"]) / COMMAND_NAME
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        return Path(xdg_data_home).expanduser() / COMMAND_NAME
+    return Path.home() / ".local" / "share" / COMMAND_NAME
+
+
+def managed_runs_dir(root: str | Path | None = None) -> Path:
+    return data_dir(root) / "runs"
+
+
+def run_registry_path(root: str | Path | None = None) -> Path:
+    return managed_runs_dir(root) / RUN_REGISTRY_FILENAME
+
+
+def empty_run_registry() -> dict[str, Any]:
+    return {"version": 1, "runs": []}
+
+
+def load_run_registry(root: str | Path | None = None) -> dict[str, Any]:
+    path = run_registry_path(root)
+    if not path.is_file():
+        return empty_run_registry()
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CliError(
+            f"Could not parse run registry {path}: {exc}",
+            "invalid_run_registry",
+        ) from exc
+    if not isinstance(registry, dict):
+        raise CliError(f"Run registry {path} must contain a JSON object", "invalid_run_registry")
+    runs = registry.get("runs")
+    if not isinstance(runs, list):
+        raise CliError("Run registry must contain a runs list", "invalid_run_registry")
+    return {"version": int(registry.get("version") or 1), "runs": runs}
+
+
+def save_run_registry(root: str | Path | None, registry: dict[str, Any]) -> Path:
+    path = run_registry_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def slugify_run_name(value: str | None, fallback: str = "youtube-video") -> str:
+    text = (value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = text.strip("-")
+    return text or fallback
+
+
+def unique_run_name(
+    title: str | None,
+    video_id: str,
+    registry: dict[str, Any],
+    exclude_run_id: str | None = None,
+) -> str:
+    base = f"{slugify_run_name(title)}-{video_id}"
+    existing = {
+        str(run.get("name"))
+        for run in registry.get("runs", [])
+        if run.get("run_id") != exclude_run_id
+    }
+    if base not in existing:
+        return base
+    for index in range(2, 10_000):
+        candidate = f"{base}-{index}"
+        if candidate not in existing:
+            return candidate
+    raise CliError(f"Could not find an available run name for {base}", "run_name_exhausted")
+
+
+def run_record_for_deep_workflow(
+    *,
+    video_id: str,
+    source_url: str,
+    title: str | None,
+    workflow: str,
+    harness: str,
+    bundle_dir: str | None,
+    root: str | Path | None = None,
+) -> dict[str, Any]:
+    registry = load_run_registry(root)
+    name = unique_run_name(title, video_id, registry)
+    managed = bundle_dir is None
+    bundle_path = (
+        managed_runs_dir(root) / name
+        if managed
+        else Path(bundle_dir).expanduser().resolve()
+    )
+    timestamp = utc_timestamp()
+    record = {
+        "run_id": f"{video_id}-{time.time_ns()}",
+        "name": name,
+        "title": title or name,
+        "video_id": video_id,
+        "source_url": source_url,
+        "bundle_path": str(bundle_path),
+        "managed": managed,
+        "workflow": workflow,
+        "harness": harness,
+        "engine": "pending",
+        "status": "running",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    registry["runs"].append(record)
+    save_run_registry(root, registry)
+    return record
+
+
+def update_run_record(record: dict[str, Any], root: str | Path | None = None) -> dict[str, Any]:
+    registry = load_run_registry(root)
+    runs = registry.get("runs", [])
+    for index, item in enumerate(runs):
+        if item.get("run_id") == record.get("run_id"):
+            record["updated_at"] = utc_timestamp()
+            runs[index] = record
+            save_run_registry(root, registry)
+            return record
+    raise CliError(f"Run disappeared from registry: {record.get('run_id')}", "run_not_found")
+
+
+def matching_runs(selector: str, registry: dict[str, Any]) -> list[dict[str, Any]]:
+    exact = [
+        run
+        for run in registry.get("runs", [])
+        if selector
+        in {
+            str(run.get("run_id") or ""),
+            str(run.get("name") or ""),
+            str(run.get("video_id") or ""),
+        }
+    ]
+    if exact:
+        return exact
+    return [
+        run
+        for run in registry.get("runs", [])
+        if str(run.get("run_id") or "").startswith(selector)
+        or str(run.get("name") or "").startswith(selector)
+        or str(run.get("video_id") or "").startswith(selector)
+    ]
+
+
+def resolve_run_selector(selector: str, root: str | Path | None = None) -> dict[str, Any]:
+    registry = load_run_registry(root)
+    matches = matching_runs(selector, registry)
+    if not matches:
+        raise CliError(f"No managed run matched: {selector}", "run_not_found")
+    if len(matches) > 1:
+        raise CliError(
+            f"Run selector is ambiguous: {selector}",
+            "ambiguous_run",
+            {"matches": [run.get("name") for run in matches]},
+        )
+    return matches[0]
+
+
+def rename_run(
+    selector: str,
+    title: str,
+    root: str | Path | None = None,
+) -> dict[str, Any]:
+    registry = load_run_registry(root)
+    matches = matching_runs(selector, registry)
+    if not matches:
+        raise CliError(f"No managed run matched: {selector}", "run_not_found")
+    if len(matches) > 1:
+        raise CliError(
+            f"Run selector is ambiguous: {selector}",
+            "ambiguous_run",
+            {"matches": [run.get("name") for run in matches]},
+        )
+    record = matches[0]
+    old_bundle_path = Path(str(record["bundle_path"]))
+    new_name = unique_run_name(title, str(record["video_id"]), registry, record.get("run_id"))
+    if record.get("managed"):
+        new_bundle_path = old_bundle_path.parent / new_name
+        if new_bundle_path.exists() and new_bundle_path != old_bundle_path:
+            raise CliError(f"Run directory already exists: {new_bundle_path}", "run_path_exists")
+        if old_bundle_path.exists() and new_bundle_path != old_bundle_path:
+            old_bundle_path.rename(new_bundle_path)
+        record["bundle_path"] = str(new_bundle_path)
+    record["name"] = new_name
+    record["title"] = title
+    record["updated_at"] = utc_timestamp()
+    for index, item in enumerate(registry["runs"]):
+        if item.get("run_id") == record.get("run_id"):
+            registry["runs"][index] = record
+            break
+    save_run_registry(root, registry)
+    return record
 
 
 def init_project(project_dir: str | Path, profile: str | None = None) -> dict[str, Any]:
@@ -2919,6 +3147,36 @@ def handle_args(args: argparse.Namespace) -> int:
         emit(payload, args.json, text)
         return 0
 
+    if args.command == "runs":
+        if args.runs_command == "list":
+            registry = load_run_registry()
+            runs = registry["runs"]
+            payload = {
+                "ok": True,
+                "runs": runs,
+                "registry_path": str(run_registry_path()),
+            }
+            text = "\n".join(
+                f"{run['name']}\n"
+                f"  status: {run['status']}\n"
+                f"  title: {run['title']}\n"
+                f"  video: {run['video_id']}\n"
+                f"  source: {run['source_url']}"
+                for run in runs
+            )
+            emit(payload, args.json, (text + "\n") if text else "No managed runs.\n")
+            return 0
+        if args.runs_command == "open":
+            run = resolve_run_selector(args.selector)
+            payload = {"ok": True, "run": run}
+            emit(payload, args.json, f"{run['bundle_path']}\n")
+            return 0
+        if args.runs_command == "rename":
+            run = rename_run(args.selector, args.title)
+            payload = {"ok": True, "run": run}
+            emit(payload, args.json, f"{run['name']}: {run['bundle_path']}\n")
+            return 0
+
     if args.command == "inspect":
         proxy_config = proxy_config_from_args(args)
         video = inspect_video_payload(args.url, proxy_config)
@@ -3061,7 +3319,21 @@ def handle_args(args: argparse.Namespace) -> int:
             f"Fetched {segment_count} transcript {segment_word} "
             f"({len(transcript['text'])} chars)"
         )
-        bundle = bundle_paths(args.bundle_dir)
+        harness = selected_agent_harness(args)
+        managed_run = None
+        bundle_dir = args.bundle_dir
+        if workflow["workflow"] == "deep":
+            managed_run = run_record_for_deep_workflow(
+                video_id=transcript["video_id"],
+                source_url=transcript["url"],
+                title=fetch_video_title(video_id, proxy_config),
+                workflow=str(workflow["workflow"]),
+                harness=harness,
+                bundle_dir=args.bundle_dir,
+            )
+            bundle_dir = str(managed_run["bundle_path"])
+            progress.message(f"Managed run: {managed_run['name']}")
+        bundle = bundle_paths(bundle_dir)
         transcript_target = args.transcript or (bundle["transcript"] if bundle else None)
         rendered = render_transcript(transcript, args.transcript_format)
         transcript_path = write_text(transcript_target, rendered)
@@ -3081,7 +3353,6 @@ def handle_args(args: argparse.Namespace) -> int:
             or (bundle["polished"] if bundle else None)
             or str(default_run_output_path(transcript["video_id"], args.style))
         )
-        harness = selected_agent_harness(args)
         instruction = resolve_instruction(args, harness)
         progress.message(f"Using {harness_label(harness)}")
         if args.chunk_chars:
@@ -3120,6 +3391,10 @@ def handle_args(args: argparse.Namespace) -> int:
                 result,
                 render_front_matter(front_matter_data),
             )
+        if managed_run is not None:
+            managed_run["status"] = "completed"
+            managed_run["harness"] = result["harness"]
+            managed_run = update_run_record(managed_run)
         payload = {
             "ok": True,
             "run": {
@@ -3145,6 +3420,7 @@ def handle_args(args: argparse.Namespace) -> int:
                 "chunking": result["chunking"],
                 "cache": cache,
                 "bundle": None,
+                "managed_run": managed_run,
             },
         }
         if bundle:
@@ -3171,6 +3447,7 @@ def handle_args(args: argparse.Namespace) -> int:
                     "front_matter_data": front_matter_data,
                     "chunking": result["chunking"],
                     "cache": cache,
+                    "managed_run": managed_run,
                     "records": {
                         "manifest": None,
                         "verification": None,
@@ -3586,6 +3863,19 @@ ai contract:
         help="optional starter profile name for .yt-scribe/config.json",
     )
     subparsers.add_parser("lifecycle", help="print the recommended workflow")
+
+    runs_parser = subparsers.add_parser("runs", help="manage saved deep workflow runs")
+    runs_subparsers = runs_parser.add_subparsers(
+        dest="runs_command",
+        required=True,
+        metavar="command",
+    )
+    runs_subparsers.add_parser("list", help="list saved deep workflow runs")
+    runs_open_parser = runs_subparsers.add_parser("open", help="print a run bundle path")
+    runs_open_parser.add_argument("selector", help="run name, video ID, or unambiguous prefix")
+    runs_rename_parser = runs_subparsers.add_parser("rename", help="rename a saved run")
+    runs_rename_parser.add_argument("selector", help="run name, video ID, or unambiguous prefix")
+    runs_rename_parser.add_argument("title", help="new display title or semantic name")
 
     inspect_parser = subparsers.add_parser(
         "inspect",

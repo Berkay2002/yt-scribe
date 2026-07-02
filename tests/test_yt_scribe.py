@@ -85,6 +85,13 @@ class YtScribeTests(unittest.TestCase):
         )
         self.duration_patcher.start()
         self.addCleanup(self.duration_patcher.stop)
+        self.title_patcher = patch.object(
+            yt_scribe,
+            "fetch_video_title",
+            return_value=None,
+        )
+        self.title_patcher.start()
+        self.addCleanup(self.title_patcher.stop)
 
     def sample_transcript(self) -> dict[str, object]:
         return {
@@ -1380,6 +1387,270 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Workflow: deep (duration_at_or_above_threshold)", stdout.getvalue())
         self.assertIn("Wrote polished transcript", stdout.getvalue())
+
+    def test_deep_run_creates_managed_registry_outside_current_project(self):
+        transcript = self.sample_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            data_dir = root / "data"
+            project_dir = root / "project"
+            project_dir.mkdir()
+            previous_cwd = Path.cwd()
+            os.chdir(project_dir)
+            try:
+                args = yt_scribe.build_parser().parse_args(
+                    ["--json", "run", "dQw4w9WgXcQ"],
+                )
+                stdout = io.StringIO()
+
+                with (
+                    patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}),
+                    patch.object(yt_scribe, "fetch_video_duration_seconds", return_value=2700),
+                    patch.object(yt_scribe, "fetch_video_title", return_value="Long Video Talk"),
+                    patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                    patch.object(
+                        yt_scribe,
+                        "run_agent_polish",
+                        side_effect=lambda **kwargs: {
+                            "output_path": yt_scribe.write_text(kwargs["out_path"], "polished\n"),
+                            "chars": len("polished\n"),
+                            "harness": "codex",
+                            "text": "polished\n",
+                        },
+                    ),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    exit_code = yt_scribe.handle_args(args)
+            finally:
+                os.chdir(previous_cwd)
+
+            payload = json.loads(stdout.getvalue())
+            registry = yt_scribe.load_run_registry(data_dir)
+
+        bundle_dir = Path(payload["run"]["bundle"]["dir"])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["run"]["workflow"], "deep")
+        self.assertEqual(payload["run"]["managed_run"]["name"], "long-video-talk-dQw4w9WgXcQ")
+        self.assertEqual(payload["run"]["managed_run"]["video_id"], "dQw4w9WgXcQ")
+        self.assertEqual(payload["run"]["managed_run"]["title"], "Long Video Talk")
+        self.assertTrue(payload["run"]["managed_run"]["managed"])
+        self.assertTrue(bundle_dir.is_relative_to(data_dir.resolve()))
+        self.assertFalse(bundle_dir.is_relative_to(project_dir.resolve()))
+        self.assertEqual(registry["runs"][0]["video_id"], "dQw4w9WgXcQ")
+        self.assertEqual(registry["runs"][0]["bundle_path"], str(bundle_dir))
+
+    def test_runs_list_open_and_rename_managed_run(self):
+        transcript = self.sample_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            run_args = yt_scribe.build_parser().parse_args(
+                ["--json", "run", "dQw4w9WgXcQ", "--workflow", "deep"],
+            )
+            run_stdout = io.StringIO()
+            with (
+                patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}),
+                patch.object(yt_scribe, "fetch_video_title", return_value="Original Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(
+                    yt_scribe,
+                    "run_agent_polish",
+                    side_effect=lambda **kwargs: {
+                        "output_path": yt_scribe.write_text(kwargs["out_path"], "polished\n"),
+                        "chars": len("polished\n"),
+                        "harness": "codex",
+                        "text": "polished\n",
+                    },
+                ),
+                contextlib.redirect_stdout(run_stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(run_args), 0)
+            created = json.loads(run_stdout.getvalue())["run"]["managed_run"]
+
+            list_args = yt_scribe.build_parser().parse_args(["--json", "runs", "list"])
+            list_stdout = io.StringIO()
+            with (
+                patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}),
+                contextlib.redirect_stdout(list_stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(list_args), 0)
+
+            open_args = yt_scribe.build_parser().parse_args(
+                ["--json", "runs", "open", "original-talk"],
+            )
+            open_stdout = io.StringIO()
+            with (
+                patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}),
+                contextlib.redirect_stdout(open_stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(open_args), 0)
+
+            rename_args = yt_scribe.build_parser().parse_args(
+                ["--json", "runs", "rename", created["name"], "Project Vocabulary"],
+            )
+            rename_stdout = io.StringIO()
+            with (
+                patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}),
+                contextlib.redirect_stdout(rename_stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(rename_args), 0)
+
+            list_payload = json.loads(list_stdout.getvalue())
+            open_payload = json.loads(open_stdout.getvalue())
+            rename_payload = json.loads(rename_stdout.getvalue())
+            old_bundle_exists = Path(created["bundle_path"]).exists()
+            renamed_bundle_is_dir = Path(rename_payload["run"]["bundle_path"]).is_dir()
+
+        self.assertEqual(list_payload["runs"][0]["name"], "original-talk-dQw4w9WgXcQ")
+        self.assertEqual(open_payload["run"]["bundle_path"], created["bundle_path"])
+        self.assertEqual(rename_payload["run"]["name"], "project-vocabulary-dQw4w9WgXcQ")
+        self.assertEqual(rename_payload["run"]["title"], "Project Vocabulary")
+        self.assertFalse(old_bundle_exists)
+        self.assertTrue(renamed_bundle_is_dir)
+
+    def test_deep_run_name_collision_adds_suffix(self):
+        transcript = self.sample_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            names = []
+            with patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}):
+                for _ in range(2):
+                    args = yt_scribe.build_parser().parse_args(
+                        ["--json", "run", "dQw4w9WgXcQ", "--workflow", "deep"],
+                    )
+                    stdout = io.StringIO()
+                    with (
+                        patch.object(yt_scribe, "fetch_video_title", return_value="Same Talk"),
+                        patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                        patch.object(
+                            yt_scribe,
+                            "run_agent_polish",
+                            side_effect=lambda **kwargs: {
+                                "output_path": yt_scribe.write_text(
+                                    kwargs["out_path"],
+                                    "polished\n",
+                                ),
+                                "chars": len("polished\n"),
+                                "harness": "codex",
+                                "text": "polished\n",
+                            },
+                        ),
+                        contextlib.redirect_stdout(stdout),
+                    ):
+                        self.assertEqual(yt_scribe.handle_args(args), 0)
+                    names.append(json.loads(stdout.getvalue())["run"]["managed_run"]["name"])
+
+        self.assertEqual(names, ["same-talk-dQw4w9WgXcQ", "same-talk-dQw4w9WgXcQ-2"])
+
+    def test_rename_custom_bundle_does_not_move_user_bundle_directory(self):
+        transcript = self.sample_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            data_dir = root / "data"
+            custom_bundle = root / "custom-bundle"
+            run_args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "run",
+                    "dQw4w9WgXcQ",
+                    "--workflow",
+                    "deep",
+                    "--bundle-dir",
+                    str(custom_bundle),
+                ],
+            )
+            run_stdout = io.StringIO()
+            with (
+                patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}),
+                patch.object(yt_scribe, "fetch_video_title", return_value="Custom Bundle Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(
+                    yt_scribe,
+                    "run_agent_polish",
+                    side_effect=lambda **kwargs: {
+                        "output_path": yt_scribe.write_text(kwargs["out_path"], "polished\n"),
+                        "chars": len("polished\n"),
+                        "harness": "codex",
+                        "text": "polished\n",
+                    },
+                ),
+                contextlib.redirect_stdout(run_stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(run_args), 0)
+            created = json.loads(run_stdout.getvalue())["run"]["managed_run"]
+
+            rename_args = yt_scribe.build_parser().parse_args(
+                ["--json", "runs", "rename", created["name"], "Renamed Talk"],
+            )
+            rename_stdout = io.StringIO()
+            with (
+                patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}),
+                contextlib.redirect_stdout(rename_stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(rename_args), 0)
+
+            renamed = json.loads(rename_stdout.getvalue())["run"]
+            custom_bundle_exists = custom_bundle.is_dir()
+
+        self.assertFalse(created["managed"])
+        self.assertEqual(created["bundle_path"], str(custom_bundle.resolve()))
+        self.assertEqual(renamed["bundle_path"], str(custom_bundle.resolve()))
+        self.assertTrue(custom_bundle_exists)
+        self.assertEqual(renamed["name"], "renamed-talk-dQw4w9WgXcQ")
+
+    def test_run_registry_rejects_missing_and_ambiguous_prefixes(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            yt_scribe.save_run_registry(
+                data_dir,
+                {
+                    "version": 1,
+                    "runs": [
+                        {
+                            "run_id": "first",
+                            "name": "alpha-dQw4w9WgXcQ",
+                            "title": "Alpha",
+                            "video_id": "dQw4w9WgXcQ",
+                            "source_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                            "bundle_path": str(data_dir / "alpha-dQw4w9WgXcQ"),
+                            "managed": True,
+                            "workflow": "deep",
+                            "harness": "codex",
+                            "engine": "pending",
+                            "status": "completed",
+                            "created_at": "2026-07-02T00:00:00Z",
+                            "updated_at": "2026-07-02T00:00:00Z",
+                        },
+                        {
+                            "run_id": "second",
+                            "name": "alpine-aaaaaaaaaaa",
+                            "title": "Alpine",
+                            "video_id": "aaaaaaaaaaa",
+                            "source_url": "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+                            "bundle_path": str(data_dir / "alpine-aaaaaaaaaaa"),
+                            "managed": True,
+                            "workflow": "deep",
+                            "harness": "codex",
+                            "engine": "pending",
+                            "status": "completed",
+                            "created_at": "2026-07-02T00:00:00Z",
+                            "updated_at": "2026-07-02T00:00:00Z",
+                        },
+                    ],
+                },
+            )
+
+            with patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}):
+                with self.assertRaises(yt_scribe.CliError) as missing:
+                    yt_scribe.resolve_run_selector("missing")
+                with self.assertRaises(yt_scribe.CliError) as ambiguous:
+                    yt_scribe.resolve_run_selector("al")
+
+        self.assertEqual(missing.exception.code, "run_not_found")
+        self.assertEqual(ambiguous.exception.code, "ambiguous_run")
 
     def test_run_profile_applies_defaults_and_cli_style_override(self):
         transcript = {

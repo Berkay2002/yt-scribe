@@ -61,6 +61,15 @@ def test_run_help_exposes_chunking_option():
     assert "--bundle-dir" in result.stdout
 
 
+def test_runs_help_exposes_run_management_commands():
+    result = run_cli("runs", "--help")
+
+    assert result.returncode == 0
+    assert "list" in result.stdout
+    assert "open" in result.stdout
+    assert "rename" in result.stdout
+
+
 def test_init_project_help_exposes_project_directory():
     result = run_cli("init-project", "--help")
 
