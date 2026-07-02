@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import tomllib
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "yt_scribe.py"
 
@@ -34,6 +36,12 @@ def test_module_entrypoint_runs_cli():
 
     assert result.returncode == 0
     assert result.stdout.strip() == "yt-scribe 0.1.0"
+
+
+def test_cli_script_metadata_uses_package_adapter():
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+    assert project["scripts"]["yt-scribe"] == "yt_scribe.cli:main"
 
 
 def test_help_exposes_human_and_agent_lifecycle():

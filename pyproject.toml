@@ -25,7 +25,7 @@ classifiers = [
 ]
 
 [project.scripts]
-yt-scribe = "yt_scribe:main"
+yt-scribe = "yt_scribe.cli:main"
 yt-scribe-mcp = "yt_scribe.mcp:main"
 
 [project.optional-dependencies]
