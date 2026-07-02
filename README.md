@@ -333,3 +333,39 @@ The plugin manifest lives in `.codex-plugin/` and points at `.agents/skills/`.
 - If YouTube blocks the IP running the command, the underlying library may raise request-blocking errors. The upstream project documents proxy support for those cases.
 - `yt-scribe` does not bypass private, unavailable, or disabled captions.
 - Long transcripts can be truncated deliberately with `--max-chars`.
+
+<details>
+<summary>Advanced usage for power users and agent workflows</summary>
+
+Use ordered language fallback when caption languages vary across videos:
+
+```sh
+yt-scribe fetch "<youtube-url>" --langs en,en-US,en-GB,sv --out transcript.txt
+yt-scribe run "<youtube-url>" --langs en,en-US,en-GB,sv
+```
+
+Add factual front matter to polished markdown when the output will be indexed,
+cited, or processed by another tool:
+
+```sh
+yt-scribe run "<youtube-url>" --front-matter --out notes.md
+```
+
+Use an explicit transcript cache when rerunning the same videos or recovering from
+interrupted polish work:
+
+```sh
+yt-scribe fetch "<youtube-url>" --cache-dir .yt-scribe/cache --out transcript.txt
+yt-scribe run "<youtube-url>" --resume --cache-dir .yt-scribe/cache --out notes.md
+```
+
+Process a plain text URL list and write a manifest for partial success tracking:
+
+```sh
+yt-scribe batch videos.txt --out-dir notes --manifest notes/manifest.json --resume
+```
+
+Batch input is one YouTube URL or video ID per line. Blank lines and lines starting
+with `#` are ignored. The manifest records succeeded, failed, and skipped items.
+
+</details>
