@@ -4339,13 +4339,16 @@ def handle_args(args: argparse.Namespace) -> int:
         transcript_text = limit_text(transcript_text, args.max_chars)
         if args.max_chars and original_transcript_chars > len(transcript_text):
             progress.message(f"Truncated transcript to {len(transcript_text)} chars")
-        out_path = (
-            args.out
-            if args.stdout
-            else args.out
-            or (bundle["polished"] if bundle else None)
-            or str(default_run_output_path(transcript["video_id"], args.style))
-        )
+        if deep_bundle and bundle:
+            out_path = args.out or bundle["polished"]
+        else:
+            out_path = (
+                args.out
+                if args.stdout
+                else args.out
+                or (bundle["polished"] if bundle else None)
+                or str(default_run_output_path(transcript["video_id"], args.style))
+            )
         instruction = resolve_instruction(args, harness)
         progress.message(f"Using {harness_label(harness)}")
         if deep_bundle:
@@ -4566,6 +4569,8 @@ def handle_args(args: argparse.Namespace) -> int:
             }
         if args.json:
             emit(payload, True)
+        elif args.stdout:
+            emit(payload, False, result["text"])
         elif result["output_path"]:
             next_text = ""
             if payload["run"]["next_commands"]:

@@ -1615,6 +1615,54 @@ class YtScribeTests(unittest.TestCase):
         self.assertTrue(verification["ok"])
         self.assertEqual(verification["missing"], [])
 
+    def test_deep_run_stdout_still_writes_final_bundle_artifact(self):
+        transcript = self.deep_engine_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "run",
+                    "dQw4w9WgXcQ",
+                    "--workflow",
+                    "deep",
+                    "--agent-harness",
+                    "opencode",
+                    "--bundle-dir",
+                    str(bundle_dir),
+                    "--stdout",
+                ],
+            )
+            stdout = io.StringIO()
+
+            def fake_polish(**kwargs):
+                out_path = Path(kwargs["out_path"])
+                text = (
+                    "merged stdout notes\n"
+                    if out_path.name == "polished.md"
+                    else "chunk notes\n"
+                )
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], text),
+                    "chars": len(text),
+                    "harness": "opencode",
+                    "text": text,
+                }
+
+            with (
+                patch.object(yt_scribe, "fetch_video_title", return_value="Stdout Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            self.assertEqual(stdout.getvalue(), "merged stdout notes\n")
+            self.assertEqual(
+                (bundle_dir / "polished.md").read_text(encoding="utf-8"),
+                "merged stdout notes\n",
+            )
+
     def test_deep_chunk_plan_uses_overlap_and_segment_boundaries(self):
         transcript = {
             "segments": [
