@@ -19,6 +19,23 @@ def run_cli(*args, env=None):
     )
 
 
+def run_module(*args):
+    return subprocess.run(
+        [sys.executable, "-m", "yt_scribe", *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_module_entrypoint_runs_cli():
+    result = run_module("--version")
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "yt-scribe 0.1.0"
+
+
 def test_help_exposes_human_and_agent_lifecycle():
     result = run_cli("--help")
 

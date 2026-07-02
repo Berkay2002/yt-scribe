@@ -25,10 +25,20 @@ def run_mcp_cli(*args):
     )
 
 
+def run_mcp_module(*args):
+    return subprocess.run(
+        [sys.executable, "-m", "yt_scribe.mcp", *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_mcp_script_metadata_exposes_console_entrypoint_and_extra():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
 
-    assert project["scripts"]["yt-scribe-mcp"] == "yt_scribe_mcp:main"
+    assert project["scripts"]["yt-scribe-mcp"] == "yt_scribe.mcp:main"
     assert "mcp" in project["optional-dependencies"]
     assert any(dep.startswith("fastmcp") for dep in project["optional-dependencies"]["mcp"])
 
@@ -41,6 +51,14 @@ def test_mcp_help_is_available_without_optional_dependencies():
     assert "--http" in result.stdout
     assert "--read-only" in result.stdout
     assert "/mcp" in result.stdout
+
+
+def test_mcp_module_entrypoint_help_is_available_without_optional_dependencies():
+    result = run_mcp_module("--help")
+
+    assert result.returncode == 0
+    assert "Run the local yt-scribe MCP server." in result.stdout
+    assert "--http" in result.stdout
 
 
 def test_readme_documents_mcp_client_configuration():
