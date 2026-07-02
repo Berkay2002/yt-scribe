@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import importlib
 import json
 import os
 import re
@@ -5155,6 +5156,115 @@ ai contract:
     )
 
     return parser
+
+
+_transcripts = importlib.import_module(".transcripts", __name__)
+_youtube = importlib.import_module(".youtube", __name__)
+
+_YOUTUBE_COMPAT_NAMES = (
+    "http_get",
+    "extract_video_id",
+    "canonical_watch_url",
+    "extract_json_object",
+    "fetch_watch_player_response",
+    "extract_video_duration_seconds",
+    "extract_video_title",
+    "fetch_video_duration_seconds",
+    "fetch_video_title",
+    "select_run_workflow",
+    "caption_name",
+    "fetch_raw_caption_tracks",
+    "list_transcript_tracks",
+    "normalize_languages",
+    "requested_languages",
+    "choose_track",
+    "choose_track_from_languages",
+    "timedtext_url",
+    "parse_json3_caption",
+    "parse_xml_caption",
+    "fetch_timedtext_segments",
+    "transcript_payload",
+    "fetch_raw_transcript",
+    "fetch_transcript",
+    "playlist_id_from_url",
+    "fetch_playlist_video_ids",
+)
+_TRANSCRIPT_COMPAT_NAMES = (
+    "srt_timestamp",
+    "timestamp_anchor",
+    "render_timestamped_transcript",
+    "split_transcript_chunks",
+    "render_transcript",
+    "transcript_cache_path",
+    "write_transcript_cache",
+    "read_transcript_cache",
+    "load_or_fetch_transcript",
+    "segment_start",
+    "segment_end",
+    "transcript_segment_line",
+    "plan_deep_chunks",
+)
+_YOUTUBE_COMPAT_ORIGINALS = {name: getattr(_youtube, name) for name in _YOUTUBE_COMPAT_NAMES}
+_TRANSCRIPT_COMPAT_ORIGINALS = {
+    name: getattr(_transcripts, name) for name in _TRANSCRIPT_COMPAT_NAMES
+}
+_TRANSCRIPT_DEPENDENCY_ORIGINALS = {
+    "extract_video_id": _YOUTUBE_COMPAT_ORIGINALS["extract_video_id"],
+    "fetch_transcript": _YOUTUBE_COMPAT_ORIGINALS["fetch_transcript"],
+}
+
+
+def _is_compat_wrapper(value: Any) -> bool:
+    return getattr(value, "_yt_scribe_compat_wrapper", False) is True
+
+
+def _sync_youtube_compat_globals() -> None:
+    for name, original in _YOUTUBE_COMPAT_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_youtube, name, original if _is_compat_wrapper(value) else value)
+
+
+def _sync_transcript_compat_globals() -> None:
+    _sync_youtube_compat_globals()
+    for name, original in _TRANSCRIPT_COMPAT_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_transcripts, name, original if _is_compat_wrapper(value) else value)
+    for name, original in _TRANSCRIPT_DEPENDENCY_ORIGINALS.items():
+        value = globals().get(name, original)
+        setattr(_transcripts, name, original if _is_compat_wrapper(value) else value)
+
+
+def _youtube_compat_function(name: str) -> Callable[..., Any]:
+    original = _YOUTUBE_COMPAT_ORIGINALS[name]
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        _sync_youtube_compat_globals()
+        return original(*args, **kwargs)
+
+    wrapper.__name__ = name
+    wrapper.__doc__ = original.__doc__
+    wrapper._yt_scribe_compat_wrapper = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+def _transcript_compat_function(name: str) -> Callable[..., Any]:
+    original = _TRANSCRIPT_COMPAT_ORIGINALS[name]
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        _sync_transcript_compat_globals()
+        return original(*args, **kwargs)
+
+    wrapper.__name__ = name
+    wrapper.__doc__ = original.__doc__
+    wrapper._yt_scribe_compat_wrapper = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+for _name in _YOUTUBE_COMPAT_NAMES:
+    globals()[_name] = _youtube_compat_function(_name)
+
+for _name in _TRANSCRIPT_COMPAT_NAMES:
+    globals()[_name] = _transcript_compat_function(_name)
 
 
 def main(argv: list[str] | None = None) -> int:
