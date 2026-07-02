@@ -39,6 +39,7 @@ mcp = [
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+py-modules = ["yt_scribe_mcp"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

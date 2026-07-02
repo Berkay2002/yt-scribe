@@ -526,6 +526,8 @@ def fetch_transcript(
     ]
 
     return transcript_payload(video_id, track, languages, segments, "youtube_transcript_api")
+
+
 def playlist_id_from_url(value: str) -> str | None:
     parsed = urllib.parse.urlparse(value)
     query = urllib.parse.parse_qs(parsed.query)

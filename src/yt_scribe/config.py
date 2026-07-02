@@ -65,6 +65,8 @@ def proxy_config_from_args(args: argparse.Namespace) -> GenericProxyConfig | Non
         return GenericProxyConfig(http_url=http_proxy, https_url=https_proxy)
     except InvalidProxyConfig as exc:
         raise CliError(str(exc), "invalid_proxy_config") from exc
+
+
 def config_path() -> Path:
     override = os.environ.get(CONFIG_ENV_VAR)
     if override:
@@ -316,6 +318,7 @@ def doctor_payload() -> dict[str, Any]:
         "skills": skills_payload(),
         "lifecycle": lifecycle_steps(),
     }
+
 
 def lifecycle_steps() -> list[dict[str, str]]:
     return [

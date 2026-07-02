@@ -44,6 +44,10 @@ def test_mcp_script_metadata_exposes_console_entrypoint_and_extra():
     assert project["scripts"]["yt-scribe-mcp"] == "yt_scribe.mcp:main"
     assert "mcp" in project["optional-dependencies"]
     assert any(dep.startswith("fastmcp") for dep in project["optional-dependencies"]["mcp"])
+    setuptools_config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "tool"
+    ]["setuptools"]
+    assert "yt_scribe_mcp" in setuptools_config["py-modules"]
 
 
 def test_mcp_help_is_available_without_optional_dependencies():

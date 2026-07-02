@@ -75,6 +75,8 @@ def split_transcript_chunks(
     if not chunks:
         chunks.append("")
     return chunks
+
+
 def render_transcript(transcript: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
         return json.dumps(transcript, ensure_ascii=False, indent=2)
@@ -88,6 +90,8 @@ def render_transcript(transcript: dict[str, Any], output_format: str) -> str:
             )
         return "\n\n".join(blocks) + "\n"
     return transcript["text"] + "\n"
+
+
 def transcript_cache_path(cache_dir: Path, video_id: str, language: str) -> Path:
     safe_language = re.sub(r"[^A-Za-z0-9_.-]+", "_", language)
     return cache_dir / f"{video_id}-{safe_language}.json"

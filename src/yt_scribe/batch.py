@@ -44,6 +44,8 @@ def read_batch_urls(path: str | Path) -> list[str]:
         if stripped and not stripped.startswith("#"):
             urls.append(stripped)
     return urls
+
+
 def expand_batch_items(
     urls: list[str],
     proxy_config: GenericProxyConfig | None,

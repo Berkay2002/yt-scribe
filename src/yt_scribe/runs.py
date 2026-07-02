@@ -53,6 +53,8 @@ def write_bundle_metadata(path: str, data: dict[str, Any]) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(target)
+
+
 def write_json_file(path: str | Path, data: Any) -> str:
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -164,6 +166,8 @@ def verify_deep_bundle_structure(
         "checked_at": utc_timestamp(),
         "chunks": len(manifest.get("chunks") or []),
     }
+
+
 def data_dir(path: str | Path | None = None) -> Path:
     if path is not None:
         return Path(path).expanduser().resolve()
