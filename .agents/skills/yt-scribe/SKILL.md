@@ -13,6 +13,18 @@ teaches an agent how to use the CLI correctly.
 
 Prefer `--json` when reading command output for analysis or chaining.
 
+If the current host exposes the `yt-scribe` MCP server, prefer MCP tools for
+structured agent workflows:
+
+- `inspect_youtube_captions` before assuming captions exist.
+- `fetch_youtube_transcript` for read-only transcript access.
+- `agent_polish_transcript` or `agent_fetch_and_polish_youtube` only when the
+  user wants agent-backed polishing and accepts that Codex or OpenCode may run.
+
+Use the CLI when MCP is not installed, when the user asks for a terminal command,
+or when file-oriented workflows such as `--out`, `--bundle-dir`, `batch`, or
+`verify` are the better fit.
+
 Read exactly one harness file for command details:
 
 - Codex: `harness/codex.md`

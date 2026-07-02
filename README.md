@@ -22,6 +22,7 @@ It uses public YouTube caption tracks when they are available through `youtube-t
 - [Lifecycle](#lifecycle)
 - [Commands](#commands)
 - [AI-Friendly JSON](#ai-friendly-json)
+- [MCP Server](#mcp-server)
 - [Agent Harnesses](#agent-harnesses)
 - [Plugin Skills](#plugin-skills)
 - [Notes](#notes)
@@ -80,7 +81,22 @@ yt-scribe doctor
 
 `yt-scribe setup` copies the shared skills to `~/.agents/skills`. This is needed when the globally installed CLI is used from projects that do not contain this repository's `.agents` folder.
 
-`yt-scribe` uses `youtube-transcript-api` for caption access. Maintainers can install test and lint tools with:
+`yt-scribe` uses `youtube-transcript-api` for caption access.
+
+Install MCP support when you want an MCP client to call yt-scribe as native
+tools:
+
+```sh
+python -m pip install --upgrade "yt-scribe[mcp] @ git+https://github.com/Berkay2002/yt-scribe.git"
+```
+
+From a checkout:
+
+```sh
+python -m pip install -e ".[dev,mcp]"
+```
+
+Maintainers can install test and lint tools with:
 
 ```sh
 pip install -e ".[dev]"
@@ -397,6 +413,189 @@ Errors return:
   }
 }
 ```
+
+## MCP Server
+
+`yt-scribe-mcp` exposes yt-scribe to local MCP clients. The server is intended
+for trusted local agents. It can fetch public caption tracks and, unless started
+in read-only mode, expose tools that may spawn Codex or OpenCode for polishing.
+
+STDIO is the default transport:
+
+```sh
+yt-scribe-mcp
+```
+
+Read-only STDIO hides the agent-backed polishing tools:
+
+```sh
+yt-scribe-mcp --read-only
+```
+
+The same read-only mode can be set with an environment variable:
+
+```sh
+YT_SCRIBE_MCP_READ_ONLY=1 yt-scribe-mcp
+```
+
+Local HTTP is explicit and binds to localhost by default:
+
+```sh
+yt-scribe-mcp --http
+```
+
+The endpoint is:
+
+```text
+http://127.0.0.1:3000/mcp
+```
+
+Use `--host` and `--port` only with `--http`:
+
+```sh
+yt-scribe-mcp --http --host 127.0.0.1 --port 3000
+```
+
+Binding HTTP to anything other than localhost prints a warning. The server has
+no built-in authentication, so do not expose it to a network unless you have
+added your own boundary and understand the risk.
+
+The read-only tools are:
+
+- `yt_scribe_info`: server metadata.
+- `inspect_youtube_captions`: caption availability for a YouTube link or video ID.
+- `fetch_youtube_transcript`: transcript fetching with ordered language fallback.
+
+The agent-backed tools are clearly named:
+
+- `agent_polish_transcript`: polish provided transcript text with Codex or OpenCode.
+- `agent_fetch_and_polish_youtube`: fetch a transcript and polish it in one call.
+
+All MCP tools return structured payloads with `ok: true` on success. Errors use
+the same code vocabulary as the CLI where practical, such as
+`invalid_youtube_url` and `no_captions`.
+
+Example STDIO MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "yt-scribe": {
+      "command": "yt-scribe-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Codex CLI and the Codex IDE extension share MCP config through
+`~/.codex/config.toml`, or a trusted project-local `.codex/config.toml`.
+Add yt-scribe over STDIO with the CLI:
+
+```sh
+codex mcp add yt-scribe -- yt-scribe-mcp
+```
+
+Or edit `config.toml`:
+
+```toml
+[mcp_servers.yt-scribe]
+command = "yt-scribe-mcp"
+startup_timeout_sec = 20
+tool_timeout_sec = 300
+```
+
+For read-only Codex use:
+
+```toml
+[mcp_servers.yt-scribe]
+command = "yt-scribe-mcp"
+args = ["--read-only"]
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+```
+
+For local HTTP, start `yt-scribe-mcp --http` yourself and configure Codex with:
+
+```toml
+[mcp_servers.yt-scribe]
+url = "http://127.0.0.1:3000/mcp"
+tool_timeout_sec = 300
+```
+
+In the Codex TUI, use `/mcp` to inspect active MCP servers.
+
+OpenCode config uses the `mcp` object in `opencode.jsonc`. Local STDIO:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "yt-scribe": {
+      "type": "local",
+      "command": ["yt-scribe-mcp"],
+      "enabled": true,
+      "timeout": 300000
+    }
+  }
+}
+```
+
+OpenCode read-only:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "yt-scribe": {
+      "type": "local",
+      "command": ["yt-scribe-mcp", "--read-only"],
+      "enabled": true,
+      "timeout": 120000
+    }
+  }
+}
+```
+
+OpenCode HTTP mode:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "yt-scribe": {
+      "type": "remote",
+      "url": "http://127.0.0.1:3000/mcp",
+      "enabled": true,
+      "timeout": 300000
+    }
+  }
+}
+```
+
+The FastMCP installer can generate or install local MCP configs for clients it
+supports, including Claude Desktop, Claude Code, Cursor, Gemini CLI, Goose,
+`mcp-json`, and `stdio`. MCP clients run servers in isolated environments, so
+declare dependencies explicitly when using `fastmcp install`.
+
+For a local checkout, generate standard MCP JSON like this:
+
+```sh
+fastmcp install mcp-json yt_scribe_mcp.py:create_mcp_server -e . --server-name yt-scribe
+```
+
+For hosts not listed by `fastmcp install`, including clients that use a generic
+MCP JSON file, use the standard STDIO config above or the generated `mcp-json`
+output.
+
+Debug with MCP Inspector:
+
+```sh
+npx @modelcontextprotocol/inspector yt-scribe-mcp
+```
+
+For HTTP mode, start the server first and point the inspector at
+`http://127.0.0.1:3000/mcp`.
 
 ## Agent Harnesses
 

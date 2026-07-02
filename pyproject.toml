@@ -26,15 +26,19 @@ classifiers = [
 
 [project.scripts]
 yt-scribe = "yt_scribe:main"
+yt-scribe-mcp = "yt_scribe_mcp:main"
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
   "ruff>=0.6",
 ]
+mcp = [
+  "fastmcp>=2.14,<4",
+]
 
 [tool.setuptools]
-py-modules = ["yt_scribe"]
+py-modules = ["yt_scribe", "yt_scribe_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

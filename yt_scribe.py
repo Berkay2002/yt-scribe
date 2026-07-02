@@ -113,6 +113,18 @@ teaches an agent how to use the CLI correctly.
 
 Prefer `--json` when reading command output for analysis or chaining.
 
+If the current host exposes the `yt-scribe` MCP server, prefer MCP tools for
+structured agent workflows:
+
+- `inspect_youtube_captions` before assuming captions exist.
+- `fetch_youtube_transcript` for read-only transcript access.
+- `agent_polish_transcript` or `agent_fetch_and_polish_youtube` only when the
+  user wants agent-backed polishing and accepts that Codex or OpenCode may run.
+
+Use the CLI when MCP is not installed, when the user asks for a terminal command,
+or when file-oriented workflows such as `--out`, `--bundle-dir`, `batch`, or
+`verify` are the better fit.
+
 Read exactly one harness file for command details:
 
 - Codex: `harness/codex.md`
@@ -574,11 +586,16 @@ def list_transcript_tracks(
     return tracks
 
 
-def normalize_languages(languages: str | list[str] | tuple[str, ...]) -> list[str]:
+def normalize_languages(
+    languages: str | list[str] | tuple[str, ...] | None,
+    default: str = "en",
+) -> list[str]:
     if isinstance(languages, str):
         candidates = [languages]
-    else:
+    elif languages:
         candidates = list(languages)
+    else:
+        candidates = [default]
 
     normalized: list[str] = []
     for candidate in candidates:
@@ -1217,6 +1234,82 @@ def render_transcript(transcript: dict[str, Any], output_format: str) -> str:
             )
         return "\n\n".join(blocks) + "\n"
     return transcript["text"] + "\n"
+
+
+def inspect_video_payload(
+    url_or_id: str,
+    proxy_config: GenericProxyConfig | None = None,
+) -> dict[str, Any]:
+    video_id = extract_video_id(url_or_id)
+    try:
+        tracks = list_transcript_tracks(video_id, proxy_config=proxy_config)
+    except CliError:
+        tracks = fetch_raw_caption_tracks(video_id, proxy_config)
+
+    manual_languages = [track.language_code for track in tracks if not track.auto_generated]
+    auto_generated_languages = [
+        track.language_code for track in tracks if track.auto_generated
+    ]
+    return {
+        "id": video_id,
+        "url": canonical_watch_url(video_id),
+        "has_captions": bool(tracks),
+        "caption_tracks": len(tracks),
+        "languages": [track.language_code for track in tracks],
+        "manual_languages": manual_languages,
+        "auto_generated_languages": auto_generated_languages,
+        "tracks": [track.public_dict() for track in tracks],
+    }
+
+
+def fetch_transcript_payload(
+    url_or_id: str,
+    languages: list[str],
+    output_format: str,
+    cache_dir: Path | None = None,
+    resume: bool = False,
+    proxy_config: GenericProxyConfig | None = None,
+    timestamps: bool = False,
+    out_path: str | None = None,
+    include_transcript: bool = False,
+) -> tuple[dict[str, Any], str]:
+    if output_format not in {"text", "json", "srt"}:
+        raise CliError(
+            f"Unsupported transcript format: {output_format}",
+            "invalid_transcript_format",
+            {"format": output_format},
+        )
+
+    transcript, cache = load_or_fetch_transcript(
+        url_or_id,
+        languages,
+        cache_dir,
+        resume,
+        proxy_config,
+    )
+    rendered = (
+        render_timestamped_transcript(transcript) + "\n"
+        if timestamps and output_format == "text"
+        else render_transcript(transcript, output_format)
+    )
+    output_path = write_text(out_path, rendered)
+    fetch_payload = {
+        "video_id": transcript["video_id"],
+        "url": transcript["url"],
+        "language": transcript["language"],
+        "requested_languages": transcript["requested_languages"],
+        "track": transcript["track"],
+        "segments": len(transcript["segments"]),
+        "chars": len(transcript["text"]),
+        "source": transcript.get("source"),
+        "format": output_format,
+        "timestamped": timestamps and output_format == "text",
+        "output_path": output_path,
+        "cache": cache,
+    }
+    if include_transcript:
+        fetch_payload["transcript"] = rendered
+    return fetch_payload, rendered
 
 
 def cache_dir_from_args(args: argparse.Namespace) -> Path | None:
@@ -2264,6 +2357,166 @@ def harness_label(harness: str) -> str:
     return {"codex": "Codex", "opencode": "OpenCode"}.get(harness, harness)
 
 
+def polish_args_namespace(
+    *,
+    style: str | None = None,
+    template: str | None = None,
+    focus: list[str] | None = None,
+    focus_file: list[str] | None = None,
+    instruction: str | None = None,
+    prompt_file: str | None = None,
+    timestamps: bool = False,
+    agent_harness: str | None = None,
+    model: str | None = None,
+    cd: str | None = None,
+    max_chars: int = 0,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        style=style or "notes",
+        template=template,
+        focus=focus,
+        focus_file=focus_file,
+        instruction=instruction,
+        prompt_file=prompt_file,
+        timestamps=timestamps,
+        agent_harness=agent_harness,
+        model=model,
+        cd=cd,
+        max_chars=max_chars,
+    )
+
+
+def polish_transcript_text_payload(
+    transcript_text: str,
+    *,
+    style: str | None = None,
+    template: str | None = None,
+    focus: list[str] | None = None,
+    focus_file: list[str] | None = None,
+    instruction: str | None = None,
+    prompt_file: str | None = None,
+    timestamps: bool = False,
+    agent_harness: str | None = None,
+    model: str | None = None,
+    cwd: str | None = None,
+    max_chars: int = 0,
+    out_path: str | None = None,
+    input_path: str | None = None,
+    progress: ProgressReporter | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    args = polish_args_namespace(
+        style=style,
+        template=template,
+        focus=focus,
+        focus_file=focus_file,
+        instruction=instruction,
+        prompt_file=prompt_file,
+        timestamps=timestamps,
+        agent_harness=agent_harness,
+        model=model,
+        cd=cwd,
+        max_chars=max_chars,
+    )
+    transcript_text = limit_text(transcript_text, max_chars)
+    harness = selected_agent_harness(args)
+    resolved_instruction = resolve_instruction(args, harness)
+    if progress:
+        progress.message(f"Using {harness_label(harness)}")
+    result = run_agent_polish(
+        transcript_text=transcript_text,
+        instruction=resolved_instruction.text,
+        out_path=out_path,
+        model=model,
+        cwd=cwd,
+        harness=harness,
+        progress=progress,
+    )
+    payload = {
+        "input_path": input_path,
+        "style": args.style,
+        "instruction_mode": resolved_instruction.mode,
+        "instruction_sources": resolved_instruction.sources,
+        "timestamp_grounding": timestamps,
+        "agent_harness": result["harness"],
+        "output_path": result["output_path"],
+        "chars": result["chars"],
+    }
+    return payload, result
+
+
+def run_youtube_polish_payload(
+    url_or_id: str,
+    *,
+    languages: list[str],
+    transcript_format: str = "text",
+    cache_dir: Path | None = None,
+    resume: bool = False,
+    proxy_config: GenericProxyConfig | None = None,
+    transcript_out_path: str | None = None,
+    style: str | None = None,
+    template: str | None = None,
+    focus: list[str] | None = None,
+    focus_file: list[str] | None = None,
+    instruction: str | None = None,
+    prompt_file: str | None = None,
+    timestamps: bool = False,
+    agent_harness: str | None = None,
+    model: str | None = None,
+    cwd: str | None = None,
+    max_chars: int = 0,
+    out_path: str | None = None,
+    progress: ProgressReporter | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    transcript, cache = load_or_fetch_transcript(
+        url_or_id,
+        languages,
+        cache_dir,
+        resume,
+        proxy_config,
+    )
+    rendered = render_transcript(transcript, transcript_format)
+    transcript_path = write_text(transcript_out_path, rendered)
+    transcript_text = (
+        render_timestamped_transcript(transcript) if timestamps else transcript["text"]
+    )
+    polish_payload, result = polish_transcript_text_payload(
+        transcript_text,
+        style=style,
+        template=template,
+        focus=focus,
+        focus_file=focus_file,
+        instruction=instruction,
+        prompt_file=prompt_file,
+        timestamps=timestamps,
+        agent_harness=agent_harness,
+        model=model,
+        cwd=cwd,
+        max_chars=max_chars,
+        out_path=out_path,
+        progress=progress,
+    )
+    payload = {
+        "video_id": transcript["video_id"],
+        "url": transcript["url"],
+        "language": transcript["language"],
+        "requested_languages": transcript.get("requested_languages", languages),
+        "segments": len(transcript["segments"]),
+        "style": polish_payload["style"],
+        "instruction_mode": polish_payload["instruction_mode"],
+        "instruction_sources": polish_payload["instruction_sources"],
+        "timestamp_grounding": timestamps,
+        "agent_harness": result["harness"],
+        "transcript_path": transcript_path,
+        "output_path": result["output_path"],
+        "chars": result["chars"],
+        "front_matter": False,
+        "chunking": chunking_disabled_payload(),
+        "cache": cache,
+        "bundle": None,
+    }
+    return payload, result
+
+
 def handle_args(args: argparse.Namespace) -> int:
     if args.command in {"polish", "run", "batch"}:
         apply_profile(args)
@@ -2362,53 +2615,43 @@ def handle_args(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "inspect":
-        video_id = extract_video_id(args.url)
-        proxy_config = proxy_config_from_args(args)
-        try:
-            tracks = list_transcript_tracks(video_id, proxy_config=proxy_config)
-        except CliError:
-            tracks = fetch_raw_caption_tracks(video_id, proxy_config)
+        video = inspect_video_payload(args.url, proxy_config_from_args(args))
+        tracks = video["tracks"]
         payload = {
             "ok": True,
             "video": {
-                "id": video_id,
-                "url": canonical_watch_url(video_id),
-                "tracks": [track.public_dict() for track in tracks],
+                "id": video["id"],
+                "url": video["url"],
+                "tracks": tracks,
             },
         }
         if args.brief:
-            manual_languages = [
-                track.language_code for track in tracks if not track.auto_generated
-            ]
-            auto_generated_languages = [
-                track.language_code for track in tracks if track.auto_generated
-            ]
             payload = {
                 "ok": True,
                 "video": {
-                    "id": video_id,
-                    "url": canonical_watch_url(video_id),
-                    "has_captions": bool(tracks),
-                    "caption_tracks": len(tracks),
-                    "languages": [track.language_code for track in tracks],
-                    "manual_languages": manual_languages,
-                    "auto_generated_languages": auto_generated_languages,
+                    "id": video["id"],
+                    "url": video["url"],
+                    "has_captions": video["has_captions"],
+                    "caption_tracks": video["caption_tracks"],
+                    "languages": video["languages"],
+                    "manual_languages": video["manual_languages"],
+                    "auto_generated_languages": video["auto_generated_languages"],
                 },
             }
             language_text = ", ".join(payload["video"]["languages"]) or "none"
             track_word = "track" if len(tracks) == 1 else "tracks"
             text = (
-                f"{canonical_watch_url(video_id)}\n"
+                f"{video['url']}\n"
                 f"captions: {'yes' if tracks else 'no'} ({len(tracks)} {track_word})\n"
                 f"languages: {language_text}\n"
             )
             emit(payload, args.json, text)
             return 0
         text = (
-            f"{canonical_watch_url(video_id)}\n"
+            f"{video['url']}\n"
             + "\n".join(
-                f"- {track.language_code}: {track.name}"
-                + (" (auto)" if track.auto_generated else "")
+                f"- {track['language_code']}: {track['name']}"
+                + (" (auto)" if track["auto_generated"] else "")
                 for track in tracks
             )
             + "\n"
@@ -2417,34 +2660,20 @@ def handle_args(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "fetch":
-        transcript, cache = load_or_fetch_transcript(
+        fetch_payload, rendered = fetch_transcript_payload(
             args.url,
             requested_languages(args),
+            args.format,
             cache_dir_from_args(args),
             args.resume,
             proxy_config_from_args(args),
+            out_path=args.out,
         )
-        rendered = render_transcript(transcript, args.format)
-        output_path = write_text(args.out, rendered)
-        payload = {
-            "ok": True,
-            "fetch": {
-                "video_id": transcript["video_id"],
-                "url": transcript["url"],
-                "language": transcript["language"],
-                "requested_languages": transcript["requested_languages"],
-                "track": transcript["track"],
-                "segments": len(transcript["segments"]),
-                "chars": len(transcript["text"]),
-                "format": args.format,
-                "output_path": output_path,
-                "cache": cache,
-            },
-        }
+        payload = {"ok": True, "fetch": fetch_payload}
         if args.json:
             emit(payload, True)
-        elif output_path:
-            emit(payload, False, f"Wrote transcript to {output_path}\n")
+        elif fetch_payload["output_path"]:
+            emit(payload, False, f"Wrote transcript to {fetch_payload['output_path']}\n")
         else:
             emit(payload, False, rendered)
         return 0
@@ -2453,38 +2682,31 @@ def handle_args(args: argparse.Namespace) -> int:
         progress = ProgressReporter(not args.json)
         progress.message(f"Reading transcript from {Path(args.file).expanduser()}")
         transcript_text = Path(args.file).expanduser().read_text(encoding="utf-8")
-        transcript_text = limit_text(transcript_text, args.max_chars)
-        progress.message(f"Loaded transcript ({len(transcript_text)} chars)")
+        limited_text = limit_text(transcript_text, args.max_chars)
+        progress.message(f"Loaded transcript ({len(limited_text)} chars)")
         out_path = (
             args.out
             if args.stdout
             else args.out or str(default_polish_output_path(args.file, args.style))
         )
-        harness = selected_agent_harness(args)
-        instruction = resolve_instruction(args, harness)
-        progress.message(f"Using {harness_label(harness)}")
-        result = run_agent_polish(
-            transcript_text=transcript_text,
-            instruction=instruction.text,
-            out_path=out_path,
+        payload_body, result = polish_transcript_text_payload(
+            transcript_text,
+            style=args.style,
+            template=args.template,
+            focus=args.focus,
+            focus_file=args.focus_file,
+            instruction=args.instruction,
+            prompt_file=args.prompt_file,
+            timestamps=args.timestamps,
+            agent_harness=args.agent_harness,
             model=args.model,
             cwd=args.cd,
-            harness=harness,
+            max_chars=args.max_chars,
+            out_path=out_path,
+            input_path=str(Path(args.file).expanduser().resolve()),
             progress=progress,
         )
-        payload = {
-            "ok": True,
-            "polish": {
-                "input_path": str(Path(args.file).expanduser().resolve()),
-                "style": args.style,
-                "instruction_mode": instruction.mode,
-                "instruction_sources": instruction.sources,
-                "timestamp_grounding": args.timestamps,
-                "agent_harness": result["harness"],
-                "output_path": result["output_path"],
-                "chars": result["chars"],
-            },
-        }
+        payload = {"ok": True, "polish": payload_body}
         if args.json:
             emit(payload, True)
         elif result["output_path"]:
