@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yt-scribe"
+version = "0.1.0"
+description = "Fetch YouTube transcripts and polish them with codex exec."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "youtube-transcript-api>=1.2.4,<2",
+]
+license = { text = "MIT" }
+authors = [{ name = "Berkay" }]
+keywords = ["youtube", "transcript", "codex", "cli", "notes"]
+classifiers = [
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+[project.scripts]
+yt-scribe = "yt_scribe:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+]
+
+[tool.setuptools]
+py-modules = ["yt_scribe"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

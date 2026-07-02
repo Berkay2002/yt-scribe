@@ -1,0 +1,4 @@
+interface:
+  display_name: "YT Scribe Transcript Polisher"
+  short_description: "Polish transcript text passed through yt-scribe."
+  default_prompt: "Polish this transcript into clean notes."
