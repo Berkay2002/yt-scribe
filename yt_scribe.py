@@ -2115,6 +2115,180 @@ def run_codex_csv_fanout_engine(
     return merge_result
 
 
+def opencode_server_config() -> dict[str, Any]:
+    username = os.environ.get("OPENCODE_SERVER_USERNAME")
+    password = os.environ.get("OPENCODE_SERVER_PASSWORD")
+    auth = None
+    if username or password:
+        auth = {"username": username, "password": password}
+    return {
+        "host": "127.0.0.1",
+        "port": None,
+        "cors": False,
+        "auth": auth,
+    }
+
+
+def opencode_server_prompt(bundle: dict[str, str], instruction: str) -> str:
+    return (
+        "Use OpenCode server-backed deep orchestration for this yt-scribe bundle.\n\n"
+        f"Bundle directory: {bundle['dir']}\n"
+        f"Chunk manifest: {bundle['chunk_manifest']}\n"
+        f"Expected final notes: {bundle['polished']}\n\n"
+        "Process each chunk using bounded subagents or background subagents when available. "
+        "Write every per-chunk note to the note paths in the manifest, then write final "
+        "merged notes to the expected final notes path. Do not create project-local "
+        ".opencode configuration for this one-off run.\n\n"
+        f"Polishing instruction:\n{instruction}"
+    )
+
+
+def run_opencode_server_session(
+    *,
+    bundle: dict[str, str],
+    prompt: str,
+    server: dict[str, Any],
+    model: str | None,
+    cwd: str | None,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
+    raise CliError(
+        "OpenCode server orchestration is not available in this environment",
+        "opencode_server_unavailable",
+        {"host": server["host"], "model": model, "cwd": cwd},
+    )
+
+
+def verify_opencode_server_artifacts(
+    bundle: dict[str, str],
+    manifest: dict[str, Any],
+    out_path: str,
+) -> list[str]:
+    required = [out_path]
+    required.extend(str(chunk["note_path"]) for chunk in manifest.get("chunks", []))
+    return [
+        str(Path(path).expanduser().resolve())
+        for path in required
+        if not Path(path).expanduser().is_file()
+        or not Path(path).expanduser().read_text(encoding="utf-8").strip()
+    ]
+
+
+def write_opencode_server_metadata(
+    bundle: dict[str, str],
+    *,
+    status: str,
+    fallback_used: bool,
+    reason: str | None,
+    session: dict[str, Any] | None = None,
+    missing: list[str] | None = None,
+    server: dict[str, Any] | None = None,
+) -> None:
+    metadata = read_json_file(bundle["metadata"])
+    metadata["opencode_server"] = {
+        "status": status,
+        "fallback_used": fallback_used,
+        "reason": reason,
+        "session": session,
+        "missing": missing or [],
+        "server": server,
+        "updated_at": utc_timestamp(),
+    }
+    write_bundle_metadata(bundle["metadata"], metadata)
+
+
+def run_opencode_server_engine(
+    *,
+    bundle: dict[str, str],
+    instruction: str,
+    out_path: str,
+    model: str | None,
+    cwd: str | None,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
+    manifest = read_json_file(bundle["chunk_manifest"])
+    server = opencode_server_config()
+    prompt = opencode_server_prompt(bundle, instruction)
+    session = run_opencode_server_session(
+        bundle=bundle,
+        prompt=prompt,
+        server=server,
+        model=model,
+        cwd=cwd,
+        progress=progress,
+    )
+    if session.get("status") != "completed":
+        write_opencode_server_metadata(
+            bundle,
+            status="fallback",
+            fallback_used=True,
+            reason="opencode_server_incomplete",
+            session=session,
+            server=server,
+        )
+        raise CliError(
+            "OpenCode server orchestration did not complete",
+            "opencode_server_incomplete",
+            {"session": session},
+        )
+
+    missing = verify_opencode_server_artifacts(bundle, manifest, out_path)
+    if missing:
+        write_opencode_server_metadata(
+            bundle,
+            status="fallback",
+            fallback_used=True,
+            reason="opencode_server_incomplete",
+            session=session,
+            missing=missing,
+            server=server,
+        )
+        raise CliError(
+            "OpenCode server orchestration did not write required artifacts",
+            "opencode_server_incomplete",
+            {"missing": missing, "session": session},
+        )
+
+    final_text = Path(out_path).read_text(encoding="utf-8")
+    metadata = read_json_file(bundle["metadata"])
+    metadata["bundle_status"] = "completed"
+    metadata["engine"] = {
+        "name": "opencode_server",
+        "status": "completed",
+        "harness": "opencode",
+        "session": session,
+        "merge_status": "server_completed",
+        "output_path": out_path,
+        "updated_at": utc_timestamp(),
+    }
+    metadata["opencode_server"] = {
+        "status": "completed",
+        "fallback_used": False,
+        "reason": None,
+        "session": session,
+        "missing": [],
+        "server": server,
+        "updated_at": utc_timestamp(),
+    }
+    write_bundle_metadata(bundle["metadata"], metadata)
+    return {
+        "output_path": out_path,
+        "chars": len(final_text),
+        "harness": "opencode",
+        "text": final_text,
+        "chunking": {
+            "enabled": True,
+            "engine": "opencode_server",
+            "chunk_chars": DEEP_CHUNK_MAX_CHARS,
+            "chunks": len(manifest.get("chunks") or []),
+            "merge_status": "server_completed",
+            "chunk_artifact_dir": bundle["chunks_dir"],
+            "resumed_chunks": 0,
+        },
+        "bundle_status": "completed",
+    }
+
+
 def data_dir(path: str | Path | None = None) -> Path:
     if path is not None:
         return Path(path).expanduser().resolve()
@@ -3942,6 +4116,36 @@ def handle_args(args: argparse.Namespace) -> int:
                             resume=True,
                             progress=progress,
                         )
+                elif harness == "opencode":
+                    try:
+                        result = run_opencode_server_engine(
+                            bundle=bundle,
+                            instruction=instruction.text,
+                            out_path=out_path,
+                            model=args.model,
+                            cwd=args.cd,
+                            progress=progress,
+                        )
+                    except CliError as exc:
+                        write_opencode_server_metadata(
+                            bundle,
+                            status="fallback",
+                            fallback_used=True,
+                            reason=exc.code,
+                            session=exc.details.get("session"),
+                            missing=list(exc.details.get("missing") or []),
+                            server=opencode_server_config(),
+                        )
+                        result = run_deep_fallback_engine(
+                            bundle=bundle,
+                            instruction=instruction.text,
+                            out_path=out_path,
+                            model=args.model,
+                            cwd=args.cd,
+                            harness=harness,
+                            resume=True,
+                            progress=progress,
+                        )
                 else:
                     result = run_deep_fallback_engine(
                         bundle=bundle,
@@ -4074,6 +4278,7 @@ def handle_args(args: argparse.Namespace) -> int:
                     "chunking": result["chunking"],
                     "engine": existing_bundle_metadata.get("engine"),
                     "codex_csv_fanout": existing_bundle_metadata.get("codex_csv_fanout"),
+                    "opencode_server": existing_bundle_metadata.get("opencode_server"),
                     "cache": cache,
                     "managed_run": managed_run,
                     "records": records,

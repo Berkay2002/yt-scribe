@@ -2023,6 +2023,181 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(metadata["codex_csv_fanout"]["status"], "fallback")
         self.assertEqual(metadata["codex_csv_fanout"]["failures"][0]["chunk_id"], "chunk-002")
 
+    def test_opencode_server_engine_uses_local_session_and_verifies_artifacts(self):
+        transcript = self.deep_engine_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            bundle_dir = root / "bundle"
+            project_dir = root / "project"
+            project_dir.mkdir()
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "run",
+                    "dQw4w9WgXcQ",
+                    "--workflow",
+                    "deep",
+                    "--agent-harness",
+                    "opencode",
+                    "--bundle-dir",
+                    str(bundle_dir),
+                    "--cd",
+                    str(project_dir),
+                ],
+            )
+            stdout = io.StringIO()
+            captured = {}
+
+            def fake_server(**kwargs):
+                captured.update(kwargs)
+                manifest = json.loads((bundle_dir / "chunk-manifest.json").read_text())
+                for chunk in manifest["chunks"]:
+                    Path(chunk["note_path"]).write_text(
+                        f"server notes for {chunk['id']}\n",
+                        encoding="utf-8",
+                    )
+                (bundle_dir / "polished.md").write_text("server final notes\n", encoding="utf-8")
+                return {"status": "completed", "session_id": "session-1", "events": 3}
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "OPENCODE_SERVER_USERNAME": "user",
+                        "OPENCODE_SERVER_PASSWORD": "secret",
+                    },
+                ),
+                patch.object(yt_scribe, "fetch_video_title", return_value="OpenCode Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(yt_scribe, "run_opencode_server_session", side_effect=fake_server),
+                patch.object(yt_scribe, "run_agent_polish") as fallback,
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            payload = json.loads(stdout.getvalue())
+            metadata = json.loads((bundle_dir / "metadata.json").read_text())
+            opencode_dir_exists = (project_dir / ".opencode").exists()
+
+        fallback.assert_not_called()
+        self.assertEqual(captured["server"]["host"], "127.0.0.1")
+        self.assertFalse(captured["server"]["cors"])
+        self.assertEqual(
+            captured["server"]["auth"],
+            {"username": "user", "password": "secret"},
+        )
+        self.assertIn("bundle", captured["prompt"])
+        self.assertEqual(payload["run"]["chunking"]["engine"], "opencode_server")
+        self.assertEqual(metadata["engine"]["name"], "opencode_server")
+        self.assertEqual(metadata["opencode_server"]["status"], "completed")
+        self.assertFalse(opencode_dir_exists)
+
+    def test_opencode_server_missing_artifacts_falls_back_to_managed_engine(self):
+        transcript = self.deep_engine_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "run",
+                    "dQw4w9WgXcQ",
+                    "--workflow",
+                    "deep",
+                    "--agent-harness",
+                    "opencode",
+                    "--bundle-dir",
+                    str(bundle_dir),
+                ],
+            )
+            stdout = io.StringIO()
+            fallback_calls = []
+
+            def fake_polish(**kwargs):
+                fallback_calls.append(Path(kwargs["out_path"]).name)
+                out_path = Path(kwargs["out_path"])
+                text = "merged notes\n" if out_path.name == "polished.md" else "chunk notes\n"
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], text),
+                    "chars": len(text),
+                    "harness": "opencode",
+                    "text": text,
+                }
+
+            with (
+                patch.object(yt_scribe, "fetch_video_title", return_value="OpenCode Fallback"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(
+                    yt_scribe,
+                    "run_opencode_server_session",
+                    return_value={"status": "completed", "session_id": "session-1"},
+                ),
+                patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            payload = json.loads(stdout.getvalue())
+            metadata = json.loads((bundle_dir / "metadata.json").read_text())
+
+        self.assertEqual(
+            fallback_calls,
+            ["chunk-001-notes.md", "chunk-002-notes.md", "polished.md"],
+        )
+        self.assertEqual(payload["run"]["chunking"]["engine"], "managed_fallback")
+        self.assertEqual(metadata["opencode_server"]["status"], "fallback")
+        self.assertEqual(metadata["opencode_server"]["reason"], "opencode_server_incomplete")
+
+    def test_opencode_server_unavailable_falls_back_to_managed_engine(self):
+        transcript = self.deep_engine_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "run",
+                    "dQw4w9WgXcQ",
+                    "--workflow",
+                    "deep",
+                    "--agent-harness",
+                    "opencode",
+                    "--bundle-dir",
+                    str(bundle_dir),
+                ],
+            )
+            stdout = io.StringIO()
+            fallback_calls = []
+
+            def fake_polish(**kwargs):
+                fallback_calls.append(Path(kwargs["out_path"]).name)
+                out_path = Path(kwargs["out_path"])
+                text = "merged notes\n" if out_path.name == "polished.md" else "chunk notes\n"
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], text),
+                    "chars": len(text),
+                    "harness": "opencode",
+                    "text": text,
+                }
+
+            with (
+                patch.object(yt_scribe, "fetch_video_title", return_value="OpenCode Unavailable"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            metadata = json.loads((bundle_dir / "metadata.json").read_text())
+
+        self.assertEqual(
+            fallback_calls,
+            ["chunk-001-notes.md", "chunk-002-notes.md", "polished.md"],
+        )
+        self.assertEqual(metadata["opencode_server"]["status"], "fallback")
+        self.assertEqual(metadata["opencode_server"]["reason"], "opencode_server_unavailable")
+
     def test_rename_custom_bundle_does_not_move_user_bundle_directory(self):
         transcript = self.sample_transcript()
 
