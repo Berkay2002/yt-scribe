@@ -2198,6 +2198,149 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(metadata["opencode_server"]["status"], "fallback")
         self.assertEqual(metadata["opencode_server"]["reason"], "opencode_server_unavailable")
 
+    def write_synthetic_completed_run(self, data_dir: Path) -> dict[str, str]:
+        bundle_dir = data_dir / "runs" / "retrieval-talk-dQw4w9WgXcQ"
+        chunks_dir = bundle_dir / "chunks"
+        chunks_dir.mkdir(parents=True)
+        (bundle_dir / "outline.md").write_text(
+            "## Retrieval Architecture\nLexical ranking chooses bounded context.\n",
+            encoding="utf-8",
+        )
+        (chunks_dir / "chunk-001-notes.md").write_text(
+            "Chunk notes: fallback engines retry missing chunks safely.\n",
+            encoding="utf-8",
+        )
+        (chunks_dir / "chunk-002-notes.md").write_text(
+            "Chunk notes: pricing details were not discussed.\n",
+            encoding="utf-8",
+        )
+        (bundle_dir / "transcript.txt").write_text(
+            "[00:10] Alpha setup detail.\n"
+            "[12:34] The timestamped retrieval snippet mentions exact source anchors.\n"
+            "[20:00] Unrelated closing remarks.\n",
+            encoding="utf-8",
+        )
+        yt_scribe.save_run_registry(
+            data_dir,
+            {
+                "version": 1,
+                "runs": [
+                    {
+                        "run_id": "run-1",
+                        "name": "retrieval-talk-dQw4w9WgXcQ",
+                        "title": "Retrieval Talk",
+                        "video_id": "dQw4w9WgXcQ",
+                        "source_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                        "bundle_path": str(bundle_dir),
+                        "managed": True,
+                        "workflow": "deep",
+                        "harness": "codex",
+                        "engine": "managed_fallback",
+                        "status": "completed",
+                        "created_at": "2026-07-02T00:00:00Z",
+                        "updated_at": "2026-07-02T00:00:00Z",
+                    }
+                ],
+            },
+        )
+        return {"bundle_dir": str(bundle_dir)}
+
+    def test_ask_show_context_retrieves_outline_chunk_notes_and_transcript(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            self.write_synthetic_completed_run(data_dir)
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "ask",
+                    "retrieval-talk",
+                    "How does retrieval retry chunks and cite timestamp anchors?",
+                    "--show-context",
+                ],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}),
+                patch.object(yt_scribe, "run_agent_polish") as agent,
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            payload = json.loads(stdout.getvalue())
+
+        agent.assert_not_called()
+        kinds = [hit["kind"] for hit in payload["ask"]["hits"]]
+        self.assertIn("outline", kinds)
+        self.assertIn("chunk_note", kinds)
+        self.assertIn("transcript", kinds)
+        transcript_hit = next(hit for hit in payload["ask"]["hits"] if hit["kind"] == "transcript")
+        self.assertEqual(transcript_hit["timestamp"], "12:34")
+
+    def test_ask_no_hit_is_honest_without_agent_call(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            self.write_synthetic_completed_run(data_dir)
+            args = yt_scribe.build_parser().parse_args(
+                ["--json", "ask", "dQw4w9WgXcQ", "What did they say about quantum bananas?"],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}),
+                patch.object(yt_scribe, "run_agent_polish") as agent,
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            payload = json.loads(stdout.getvalue())
+
+        agent.assert_not_called()
+        self.assertFalse(payload["ask"]["has_hits"])
+        self.assertIn("No relevant context", payload["ask"]["answer"])
+
+    def test_ask_agent_prompt_uses_only_retrieved_context(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            self.write_synthetic_completed_run(data_dir)
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "ask",
+                    "retrieval-talk-dQw4w9WgXcQ",
+                    "What source anchors support retrieval?",
+                    "--agent",
+                    "--agent-harness",
+                    "codex",
+                ],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.dict(os.environ, {yt_scribe.DATA_DIR_ENV_VAR: str(data_dir)}),
+                patch.object(
+                    yt_scribe,
+                    "run_agent_polish",
+                    return_value={
+                        "output_path": None,
+                        "chars": len("grounded answer\n"),
+                        "harness": "codex",
+                        "text": "grounded answer\n",
+                    },
+                ) as agent,
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            payload = json.loads(stdout.getvalue())
+            context_text = agent.call_args.kwargs["transcript_text"]
+            instruction = agent.call_args.kwargs["instruction"]
+
+        self.assertEqual(payload["ask"]["answer"], "grounded answer\n")
+        self.assertIn("[12:34]", context_text)
+        self.assertNotIn("Unrelated closing remarks", context_text)
+        self.assertIn("Answer the question using only the retrieved context", instruction)
+
     def test_rename_custom_bundle_does_not_move_user_bundle_directory(self):
         transcript = self.sample_transcript()
 

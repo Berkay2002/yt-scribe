@@ -2496,6 +2496,150 @@ def rename_run(
     return record
 
 
+RETRIEVAL_STOPWORDS = {
+    "a",
+    "about",
+    "and",
+    "are",
+    "did",
+    "does",
+    "for",
+    "how",
+    "is",
+    "of",
+    "or",
+    "the",
+    "they",
+    "to",
+    "what",
+    "with",
+}
+
+
+def retrieval_tokens(text: str) -> set[str]:
+    tokens = set()
+    for token in re.findall(r"[A-Za-z0-9]+", text.lower()):
+        if token in RETRIEVAL_STOPWORDS or len(token) < 3:
+            continue
+        tokens.add(token)
+        if token.endswith("s") and len(token) > 4:
+            tokens.add(token[:-1])
+    return tokens
+
+
+def retrieval_score(query_tokens: set[str], text: str) -> int:
+    return len(query_tokens & retrieval_tokens(text))
+
+
+def split_markdown_blocks(text: str) -> list[str]:
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("#") and current:
+            blocks.append("\n".join(current).strip())
+            current = [line]
+        elif line.strip():
+            current.append(line)
+        elif current:
+            blocks.append("\n".join(current).strip())
+            current = []
+    if current:
+        blocks.append("\n".join(current).strip())
+    return [block for block in blocks if block]
+
+
+def transcript_timestamp(line: str) -> str | None:
+    match = re.match(r"\[([0-9:]+)\]\s*(.*)", line.strip())
+    return match.group(1) if match else None
+
+
+def retrieve_run_context(
+    run: dict[str, Any],
+    question: str,
+    *,
+    top_k: int = 5,
+) -> dict[str, Any]:
+    bundle_dir = Path(str(run["bundle_path"]))
+    query_tokens = retrieval_tokens(question)
+    hits: list[dict[str, Any]] = []
+
+    outline_path = bundle_dir / "outline.md"
+    if outline_path.is_file():
+        for block in split_markdown_blocks(outline_path.read_text(encoding="utf-8")):
+            score = retrieval_score(query_tokens, block)
+            if score:
+                hits.append(
+                    {
+                        "kind": "outline",
+                        "score": score,
+                        "path": str(outline_path),
+                        "text": block,
+                    }
+                )
+
+    chunks_dir = bundle_dir / "chunks"
+    if chunks_dir.is_dir():
+        for note_path in sorted(chunks_dir.glob("*-notes.md")):
+            text = note_path.read_text(encoding="utf-8")
+            score = retrieval_score(query_tokens, text)
+            if score:
+                hits.append(
+                    {
+                        "kind": "chunk_note",
+                        "score": score,
+                        "path": str(note_path),
+                        "text": text.strip(),
+                    }
+                )
+
+    transcript_path = bundle_dir / "transcript.txt"
+    if transcript_path.is_file():
+        transcript_lines = transcript_path.read_text(encoding="utf-8").splitlines()
+        for line_number, line in enumerate(transcript_lines, 1):
+            score = retrieval_score(query_tokens, line)
+            if score:
+                hits.append(
+                    {
+                        "kind": "transcript",
+                        "score": score,
+                        "path": str(transcript_path),
+                        "line": line_number,
+                        "timestamp": transcript_timestamp(line),
+                        "text": line.strip(),
+                    }
+                )
+
+    hits.sort(key=lambda hit: (-int(hit["score"]), str(hit["kind"]), str(hit.get("path"))))
+    selected = hits[:top_k]
+    return {
+        "question": question,
+        "query_tokens": sorted(query_tokens),
+        "hits": selected,
+        "has_hits": bool(selected),
+    }
+
+
+def render_ask_context(hits: list[dict[str, Any]]) -> str:
+    if not hits:
+        return "No relevant context found for this question."
+    parts = []
+    for index, hit in enumerate(hits, start=1):
+        timestamp = f" [{hit['timestamp']}]" if hit.get("timestamp") else ""
+        parts.append(
+            f"[{index}] {hit['kind']}{timestamp} score={hit['score']}\n{hit['text']}"
+        )
+    return "\n\n".join(parts)
+
+
+def ask_agent_instruction(question: str) -> str:
+    return (
+        "Answer the question using only the retrieved context. "
+        "If the context is insufficient, say what is missing. "
+        "Do not use the full transcript or outside knowledge.\n\n"
+        f"Question: {question}"
+    )
+
+
 def init_project(project_dir: str | Path, profile: str | None = None) -> dict[str, Any]:
     root = Path(project_dir).expanduser().resolve()
     yt_scribe_dir = root / ".yt-scribe"
@@ -3891,6 +4035,56 @@ def handle_args(args: argparse.Namespace) -> int:
             emit(payload, args.json, f"{run['name']}: {run['bundle_path']}\n")
             return 0
 
+    if args.command == "ask":
+        run = resolve_run_selector(args.selector)
+        if run.get("status") not in {None, "completed"}:
+            raise CliError(f"Run is not completed: {run.get('name')}", "run_not_completed")
+        question = " ".join(args.question).strip()
+        retrieval = retrieve_run_context(run, question, top_k=args.top_k)
+        context_text = render_ask_context(retrieval["hits"])
+        answer = None
+        agent_payload = None
+        if args.agent and retrieval["has_hits"]:
+            harness = args.agent_harness or effective_agent_harness()
+            result = run_agent_polish(
+                transcript_text=context_text,
+                instruction=ask_agent_instruction(question),
+                out_path=None,
+                model=args.model,
+                cwd=args.cd,
+                harness=harness,
+                progress=ProgressReporter(False),
+            )
+            answer = result["text"]
+            agent_payload = {
+                "agent_harness": result["harness"],
+                "chars": result["chars"],
+            }
+        elif not retrieval["has_hits"]:
+            answer = "No relevant context found for this question."
+        elif args.show_context:
+            answer = context_text
+
+        payload = {
+            "ok": True,
+            "ask": {
+                "run": {
+                    "name": run.get("name"),
+                    "video_id": run.get("video_id"),
+                    "bundle_path": run.get("bundle_path"),
+                },
+                "question": question,
+                "has_hits": retrieval["has_hits"],
+                "hits": retrieval["hits"],
+                "context": context_text if args.show_context else None,
+                "answer": answer,
+                "agent": agent_payload,
+            },
+        }
+        text = answer or context_text
+        emit(payload, args.json, text + "\n")
+        return 0
+
     if args.command == "inspect":
         proxy_config = proxy_config_from_args(args)
         video = inspect_video_payload(args.url, proxy_config)
@@ -4709,6 +4903,27 @@ ai contract:
     runs_rename_parser = runs_subparsers.add_parser("rename", help="rename a saved run")
     runs_rename_parser.add_argument("selector", help="run name, video ID, or unambiguous prefix")
     runs_rename_parser.add_argument("title", help="new display title or semantic name")
+
+    ask_parser = subparsers.add_parser(
+        "ask",
+        help="retrieve context from a completed deep run and answer a question",
+    )
+    ask_parser.add_argument("selector", help="run name, video ID, or unambiguous prefix")
+    ask_parser.add_argument("question", nargs="+", help="question to ask against the run")
+    ask_parser.add_argument(
+        "--show-context",
+        action="store_true",
+        help="print retrieved context without invoking an agent",
+    )
+    ask_parser.add_argument(
+        "--agent",
+        action="store_true",
+        help="answer with the configured agent harness using only retrieved context",
+    )
+    ask_parser.add_argument("--agent-harness", choices=AGENT_HARNESSES)
+    ask_parser.add_argument("--model", help="optional agent model override")
+    ask_parser.add_argument("--cd", help="working directory to pass to the agent harness")
+    ask_parser.add_argument("--top-k", type=int, default=5, help="number of context hits")
 
     inspect_parser = subparsers.add_parser(
         "inspect",

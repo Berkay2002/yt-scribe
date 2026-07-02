@@ -70,6 +70,14 @@ def test_runs_help_exposes_run_management_commands():
     assert "rename" in result.stdout
 
 
+def test_ask_help_exposes_context_and_agent_modes():
+    result = run_cli("ask", "--help")
+
+    assert result.returncode == 0
+    assert "--show-context" in result.stdout
+    assert "--agent" in result.stdout
+
+
 def test_init_project_help_exposes_project_directory():
     result = run_cli("init-project", "--help")
 
