@@ -56,6 +56,7 @@ def test_run_help_exposes_chunking_option():
     result = run_cli("run", "--help")
 
     assert result.returncode == 0
+    assert "--workflow" in result.stdout
     assert "--chunk-chars" in result.stdout
     assert "--bundle-dir" in result.stdout
 

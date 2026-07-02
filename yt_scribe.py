@@ -38,6 +38,8 @@ HTTPS_PROXY_ENV_VAR = "YT_SCRIBE_HTTPS_PROXY"
 DEFAULT_CACHE_DIR = Path(".yt-scribe") / "cache"
 PROJECT_CONFIG = Path(".yt-scribe") / CONFIG_FILENAME
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+DEEP_WORKFLOW_DURATION_THRESHOLD_SECONDS = 45 * 60
+RUN_WORKFLOWS = ("auto", "quick", "deep")
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -539,6 +541,71 @@ def extract_json_object(text: str, marker: str) -> dict[str, Any]:
     raise CliError(f"Could not parse JSON object after {marker}", "caption_metadata_parse_failed")
 
 
+def fetch_watch_player_response(
+    video_id: str,
+    proxy_config: GenericProxyConfig | None = None,
+) -> dict[str, Any]:
+    page = http_get(canonical_watch_url(video_id), proxy_config).decode(
+        "utf-8",
+        errors="replace",
+    )
+    return extract_json_object(page, "ytInitialPlayerResponse")
+
+
+def extract_video_duration_seconds(player_response: dict[str, Any]) -> int | None:
+    details = player_response.get("videoDetails")
+    if not isinstance(details, dict):
+        return None
+    raw_duration = details.get("lengthSeconds")
+    if isinstance(raw_duration, bool) or raw_duration is None:
+        return None
+    try:
+        duration = int(str(raw_duration))
+    except ValueError:
+        return None
+    return duration if duration >= 0 else None
+
+
+def fetch_video_duration_seconds(
+    video_id: str,
+    proxy_config: GenericProxyConfig | None = None,
+) -> int | None:
+    try:
+        player_response = fetch_watch_player_response(video_id, proxy_config)
+    except (CliError, json.JSONDecodeError):
+        return None
+    return extract_video_duration_seconds(player_response)
+
+
+def select_run_workflow(
+    requested_workflow: str,
+    duration_seconds: int | None,
+) -> dict[str, int | str | None]:
+    if requested_workflow == "quick":
+        selected = "quick"
+        reason = "explicit_quick"
+    elif requested_workflow == "deep":
+        selected = "deep"
+        reason = "explicit_deep"
+    elif duration_seconds is None:
+        selected = "quick"
+        reason = "duration_unknown"
+    elif duration_seconds >= DEEP_WORKFLOW_DURATION_THRESHOLD_SECONDS:
+        selected = "deep"
+        reason = "duration_at_or_above_threshold"
+    else:
+        selected = "quick"
+        reason = "duration_below_threshold"
+
+    return {
+        "workflow": selected,
+        "workflow_requested": requested_workflow,
+        "workflow_reason": reason,
+        "duration_seconds": duration_seconds,
+        "workflow_threshold_seconds": DEEP_WORKFLOW_DURATION_THRESHOLD_SECONDS,
+    }
+
+
 def caption_name(track: dict[str, Any]) -> str:
     name = track.get("name", {})
     if isinstance(name, dict):
@@ -555,11 +622,7 @@ def fetch_raw_caption_tracks(
     video_id: str,
     proxy_config: GenericProxyConfig | None = None,
 ) -> list[CaptionTrack]:
-    page = http_get(canonical_watch_url(video_id), proxy_config).decode(
-        "utf-8",
-        errors="replace",
-    )
-    player = extract_json_object(page, "ytInitialPlayerResponse")
+    player = fetch_watch_player_response(video_id, proxy_config)
     renderer = player.get("captions", {}).get("playerCaptionsTracklistRenderer", {})
     raw_tracks = renderer.get("captionTracks") or []
     tracks = [
@@ -1302,6 +1365,7 @@ def inspect_video_payload(
     proxy_config: GenericProxyConfig | None = None,
 ) -> dict[str, Any]:
     video_id = extract_video_id(url_or_id)
+    duration_seconds = fetch_video_duration_seconds(video_id, proxy_config)
     try:
         tracks = list_transcript_tracks(video_id, proxy_config=proxy_config)
     except CliError:
@@ -1314,6 +1378,7 @@ def inspect_video_payload(
     return {
         "id": video_id,
         "url": canonical_watch_url(video_id),
+        "duration_seconds": duration_seconds,
         "has_captions": bool(tracks),
         "caption_tracks": len(tracks),
         "languages": [track.language_code for track in tracks],
@@ -2863,6 +2928,7 @@ def handle_args(args: argparse.Namespace) -> int:
             "video": {
                 "id": video["id"],
                 "url": video["url"],
+                "duration_seconds": video["duration_seconds"],
                 "tracks": tracks,
             },
         }
@@ -2872,6 +2938,7 @@ def handle_args(args: argparse.Namespace) -> int:
                 "video": {
                     "id": video["id"],
                     "url": video["url"],
+                    "duration_seconds": video["duration_seconds"],
                     "has_captions": video["has_captions"],
                     "caption_tracks": video["caption_tracks"],
                     "languages": video["languages"],
@@ -2881,8 +2948,14 @@ def handle_args(args: argparse.Namespace) -> int:
             }
             language_text = ", ".join(payload["video"]["languages"]) or "none"
             track_word = "track" if len(tracks) == 1 else "tracks"
+            duration_text = (
+                f"duration: {video['duration_seconds']} seconds\n"
+                if video["duration_seconds"] is not None
+                else ""
+            )
             text = (
                 f"{video['url']}\n"
+                f"{duration_text}"
                 f"captions: {'yes' if tracks else 'no'} ({len(tracks)} {track_word})\n"
                 f"languages: {language_text}\n"
             )
@@ -2890,6 +2963,11 @@ def handle_args(args: argparse.Namespace) -> int:
             return 0
         text = (
             f"{video['url']}\n"
+            + (
+                f"duration: {video['duration_seconds']} seconds\n"
+                if video["duration_seconds"] is not None
+                else ""
+            )
             + "\n".join(
                 f"- {track['language_code']}: {track['name']}"
                 + (" (auto)" if track["auto_generated"] else "")
@@ -2958,13 +3036,24 @@ def handle_args(args: argparse.Namespace) -> int:
 
     if args.command == "run":
         progress = ProgressReporter(not args.json)
-        progress.message(f"Fetching transcript for {extract_video_id(args.url)}")
+        video_id = extract_video_id(args.url)
+        proxy_config = proxy_config_from_args(args)
+        duration_seconds = (
+            fetch_video_duration_seconds(video_id, proxy_config)
+            if args.workflow == "auto"
+            else None
+        )
+        workflow = select_run_workflow(args.workflow, duration_seconds)
+        progress.message(
+            f"Workflow: {workflow['workflow']} ({workflow['workflow_reason']})"
+        )
+        progress.message(f"Fetching transcript for {video_id}")
         transcript, cache = load_or_fetch_transcript(
             args.url,
             requested_languages(args),
             cache_dir_from_args(args),
             args.resume,
-            proxy_config_from_args(args),
+            proxy_config,
         )
         segment_count = len(transcript["segments"])
         segment_word = "segment" if segment_count == 1 else "segments"
@@ -3036,6 +3125,7 @@ def handle_args(args: argparse.Namespace) -> int:
             "run": {
                 "video_id": transcript["video_id"],
                 "url": transcript["url"],
+                **workflow,
                 "language": transcript["language"],
                 "requested_languages": transcript.get(
                     "requested_languages",
@@ -3063,6 +3153,7 @@ def handle_args(args: argparse.Namespace) -> int:
                 {
                     "video_id": transcript["video_id"],
                     "url": transcript["url"],
+                    **workflow,
                     "language": transcript["language"],
                     "requested_languages": transcript.get(
                         "requested_languages",
@@ -3099,7 +3190,11 @@ def handle_args(args: argparse.Namespace) -> int:
         if args.json:
             emit(payload, True)
         elif result["output_path"]:
-            emit(payload, False, f"Wrote polished transcript to {result['output_path']}\n")
+            text = (
+                f"Workflow: {workflow['workflow']} ({workflow['workflow_reason']})\n"
+                f"Wrote polished transcript to {result['output_path']}\n"
+            )
+            emit(payload, False, text)
         else:
             emit(payload, False, result["text"])
         return 0
@@ -3551,6 +3646,12 @@ ai contract:
     )
     run_parser.add_argument("--transcript", help="also write the raw transcript to this file")
     run_parser.add_argument("--transcript-format", choices=["text", "json", "srt"], default=None)
+    run_parser.add_argument(
+        "--workflow",
+        choices=RUN_WORKFLOWS,
+        default="auto",
+        help="run workflow selection, default: auto",
+    )
     run_parser.add_argument(
         "--bundle-dir",
         help="advanced: write transcript, polished output, and metadata under this directory",

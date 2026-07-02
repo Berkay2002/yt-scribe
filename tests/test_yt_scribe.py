@@ -77,6 +77,26 @@ class FetchBlockedTranscriptApi:
 
 
 class YtScribeTests(unittest.TestCase):
+    def setUp(self):
+        self.duration_patcher = patch.object(
+            yt_scribe,
+            "fetch_video_duration_seconds",
+            return_value=None,
+        )
+        self.duration_patcher.start()
+        self.addCleanup(self.duration_patcher.stop)
+
+    def sample_transcript(self) -> dict[str, object]:
+        return {
+            "video_id": "dQw4w9WgXcQ",
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "language": "en",
+            "requested_languages": ["en"],
+            "track": {"language_code": "en"},
+            "segments": [{"text": "hello world"}],
+            "text": "hello world",
+        }
+
     def test_embedded_skill_assets_match_source_files(self):
         for relative_path, embedded in yt_scribe.EMBEDDED_SKILL_ASSETS.items():
             with self.subTest(relative_path=relative_path):
@@ -114,6 +134,25 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(
             yt_scribe.parse_json3_caption(payload),
             [{"start": 1.0, "duration": 0.5, "text": "hello world"}],
+        )
+
+    def test_extract_video_duration_seconds(self):
+        self.assertEqual(
+            yt_scribe.extract_video_duration_seconds(
+                {"videoDetails": {"lengthSeconds": "2700"}}
+            ),
+            2700,
+        )
+        self.assertIsNone(yt_scribe.extract_video_duration_seconds({}))
+        self.assertIsNone(
+            yt_scribe.extract_video_duration_seconds(
+                {"videoDetails": {"lengthSeconds": "not-a-number"}}
+            )
+        )
+        self.assertIsNone(
+            yt_scribe.extract_video_duration_seconds(
+                {"videoDetails": {"lengthSeconds": "-1"}}
+            )
         )
 
     def test_srt_timestamp(self):
@@ -1181,6 +1220,167 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(payload["run"]["requested_languages"], ["en", "en-GB"])
         self.assertEqual(payload["run"]["language"], "en-GB")
 
+    def test_run_auto_workflow_selects_quick_below_duration_threshold(self):
+        transcript = self.sample_transcript()
+        args = yt_scribe.build_parser().parse_args(
+            ["--json", "run", "dQw4w9WgXcQ", "--stdout"],
+        )
+        stdout = io.StringIO()
+
+        with (
+            patch.object(yt_scribe, "fetch_video_duration_seconds", return_value=2699),
+            patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+            patch.object(
+                yt_scribe,
+                "run_agent_polish",
+                return_value={
+                    "output_path": None,
+                    "chars": len("polished text\n"),
+                    "harness": "codex",
+                    "text": "polished text\n",
+                },
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["run"]["workflow"], "quick")
+        self.assertEqual(payload["run"]["workflow_requested"], "auto")
+        self.assertEqual(payload["run"]["workflow_reason"], "duration_below_threshold")
+        self.assertEqual(payload["run"]["duration_seconds"], 2699)
+        self.assertEqual(payload["run"]["workflow_threshold_seconds"], 2700)
+
+    def test_run_auto_workflow_selects_deep_at_duration_threshold(self):
+        transcript = self.sample_transcript()
+        args = yt_scribe.build_parser().parse_args(
+            ["--json", "run", "dQw4w9WgXcQ", "--stdout"],
+        )
+        stdout = io.StringIO()
+
+        with (
+            patch.object(yt_scribe, "fetch_video_duration_seconds", return_value=2700),
+            patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+            patch.object(
+                yt_scribe,
+                "run_agent_polish",
+                return_value={
+                    "output_path": None,
+                    "chars": len("polished text\n"),
+                    "harness": "codex",
+                    "text": "polished text\n",
+                },
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["run"]["workflow"], "deep")
+        self.assertEqual(payload["run"]["workflow_requested"], "auto")
+        self.assertEqual(payload["run"]["workflow_reason"], "duration_at_or_above_threshold")
+        self.assertEqual(payload["run"]["duration_seconds"], 2700)
+
+    def test_run_explicit_workflow_overrides_auto_selection(self):
+        transcript = self.sample_transcript()
+
+        for workflow in ("quick", "deep"):
+            with self.subTest(workflow=workflow):
+                args = yt_scribe.build_parser().parse_args(
+                    ["--json", "run", "dQw4w9WgXcQ", "--stdout", "--workflow", workflow],
+                )
+                stdout = io.StringIO()
+
+                with (
+                    patch.object(yt_scribe, "fetch_video_duration_seconds") as fetch_duration,
+                    patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                    patch.object(
+                        yt_scribe,
+                        "run_agent_polish",
+                        return_value={
+                            "output_path": None,
+                            "chars": len("polished text\n"),
+                            "harness": "codex",
+                            "text": "polished text\n",
+                        },
+                    ),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    exit_code = yt_scribe.handle_args(args)
+
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(payload["run"]["workflow"], workflow)
+                self.assertEqual(payload["run"]["workflow_requested"], workflow)
+                self.assertEqual(payload["run"]["workflow_reason"], f"explicit_{workflow}")
+                self.assertIsNone(payload["run"]["duration_seconds"])
+                fetch_duration.assert_not_called()
+
+    def test_run_auto_workflow_uses_quick_when_duration_is_missing(self):
+        transcript = self.sample_transcript()
+        args = yt_scribe.build_parser().parse_args(
+            ["--json", "run", "dQw4w9WgXcQ", "--stdout"],
+        )
+        stdout = io.StringIO()
+
+        with (
+            patch.object(yt_scribe, "fetch_video_duration_seconds", return_value=None),
+            patch.object(yt_scribe, "fetch_transcript", return_value=transcript) as fetch,
+            patch.object(
+                yt_scribe,
+                "run_agent_polish",
+                return_value={
+                    "output_path": None,
+                    "chars": len("polished text\n"),
+                    "harness": "codex",
+                    "text": "polished text\n",
+                },
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["run"]["workflow"], "quick")
+        self.assertEqual(payload["run"]["workflow_reason"], "duration_unknown")
+        self.assertIsNone(payload["run"]["duration_seconds"])
+        fetch.assert_called_once()
+
+    def test_run_human_output_reports_workflow_when_writing_file(self):
+        transcript = self.sample_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "notes.md"
+            args = yt_scribe.build_parser().parse_args(
+                ["run", "dQw4w9WgXcQ", "--out", str(output_path)],
+            )
+            stdout = io.StringIO()
+
+            with (
+                patch.object(yt_scribe, "fetch_video_duration_seconds", return_value=2700),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(
+                    yt_scribe,
+                    "run_agent_polish",
+                    side_effect=lambda **kwargs: {
+                        "output_path": yt_scribe.write_text(kwargs["out_path"], "polished\n"),
+                        "chars": len("polished\n"),
+                        "harness": "codex",
+                        "text": "polished\n",
+                    },
+                ),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                exit_code = yt_scribe.handle_args(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Workflow: deep (duration_at_or_above_threshold)", stdout.getvalue())
+        self.assertIn("Wrote polished transcript", stdout.getvalue())
+
     def test_run_profile_applies_defaults_and_cli_style_override(self):
         transcript = {
             "video_id": "dQw4w9WgXcQ",
@@ -1344,6 +1544,40 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(payload["video"]["languages"], ["en", "sv"])
         self.assertEqual(payload["video"]["manual_languages"], ["en"])
         self.assertEqual(payload["video"]["auto_generated_languages"], ["sv"])
+
+    def test_inspect_brief_reports_duration_when_available(self):
+        args = yt_scribe.build_parser().parse_args(["--json", "inspect", "dQw4w9WgXcQ", "--brief"])
+        stdout = io.StringIO()
+        tracks = [yt_scribe.CaptionTrack("English", "en", "https://example.test/en")]
+
+        with (
+            patch.object(yt_scribe, "fetch_video_duration_seconds", return_value=123),
+            patch.object(yt_scribe, "list_transcript_tracks", return_value=tracks),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["video"]["duration_seconds"], 123)
+
+    def test_inspect_keeps_caption_availability_when_duration_is_missing(self):
+        args = yt_scribe.build_parser().parse_args(["--json", "inspect", "dQw4w9WgXcQ", "--brief"])
+        stdout = io.StringIO()
+        tracks = [yt_scribe.CaptionTrack("English", "en", "https://example.test/en")]
+
+        with (
+            patch.object(yt_scribe, "fetch_video_duration_seconds", return_value=None),
+            patch.object(yt_scribe, "list_transcript_tracks", return_value=tracks),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertIsNone(payload["video"]["duration_seconds"])
+        self.assertTrue(payload["video"]["has_captions"])
+        self.assertEqual(payload["video"]["caption_tracks"], 1)
 
     def test_verify_polished_output_classifies_findings_conservatively(self):
         transcript = (
