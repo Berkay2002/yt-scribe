@@ -164,6 +164,7 @@ yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID" --focus "Keep only deci
 ```sh
 yt-scribe doctor
 yt-scribe inspect "<youtube-url>"
+yt-scribe inspect "https://www.youtube.com/playlist?list=PLAYLIST_ID" --brief
 yt-scribe fetch "<youtube-url>" --out transcript.txt
 yt-scribe polish transcript.txt --style notes --out notes.md
 yt-scribe run "<youtube-url>"
@@ -192,13 +193,15 @@ yt-scribe --json setup
 
 `inspect <url>`
 
-Resolves the YouTube video and lists caption tracks.
+Resolves the YouTube video and lists caption tracks. Playlist URLs preflight
+each playlist video, so you can see caption availability before batch polishing.
 
 Use `--brief` when an agent or script only needs caption availability and
 language codes:
 
 ```sh
 yt-scribe inspect "<url>" --brief
+yt-scribe inspect "https://www.youtube.com/playlist?list=PLAYLIST_ID" --brief
 ```
 
 `fetch <url>`

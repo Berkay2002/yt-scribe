@@ -1150,6 +1150,48 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(payload["video"]["manual_languages"], ["en"])
         self.assertEqual(payload["video"]["auto_generated_languages"], ["sv"])
 
+    def test_inspect_playlist_preflights_caption_availability(self):
+        args = yt_scribe.build_parser().parse_args(
+            [
+                "--json",
+                "inspect",
+                "https://www.youtube.com/playlist?list=PLabc123",
+                "--brief",
+            ]
+        )
+        stdout = io.StringIO()
+
+        def fake_inspect(url_or_id, proxy_config=None):
+            video_id = yt_scribe.extract_video_id(url_or_id)
+            return {
+                "id": video_id,
+                "url": yt_scribe.canonical_watch_url(video_id),
+                "has_captions": video_id == "dQw4w9WgXcQ",
+                "caption_tracks": 1 if video_id == "dQw4w9WgXcQ" else 0,
+                "languages": ["en"] if video_id == "dQw4w9WgXcQ" else [],
+                "manual_languages": ["en"] if video_id == "dQw4w9WgXcQ" else [],
+                "auto_generated_languages": [],
+                "tracks": [],
+            }
+
+        with (
+            patch.object(
+                yt_scribe,
+                "fetch_playlist_video_ids",
+                return_value=["dQw4w9WgXcQ", "aaaaaaaaaaa"],
+            ),
+            patch.object(yt_scribe, "inspect_video_payload", side_effect=fake_inspect),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = yt_scribe.handle_args(args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["playlist"]["id"], "PLabc123")
+        self.assertEqual(payload["playlist"]["total"], 2)
+        self.assertEqual(payload["playlist"]["with_captions"], 1)
+        self.assertEqual(payload["playlist"]["videos"][0]["languages"], ["en"])
+
     def test_verify_polished_output_classifies_findings_conservatively(self):
         transcript = (
             "[00:01] Alice shipped 42 widgets.\n"
@@ -1169,6 +1211,7 @@ class YtScribeTests(unittest.TestCase):
         )
         self.assertEqual(result["summary"]["unsupported"], 1)
         self.assertEqual(result["findings"][0]["transcript_anchor"], "00:01")
+        self.assertEqual(result["findings"][0]["polished_location"]["line"], 1)
         self.assertEqual(result["findings"][1]["unsupported_terms"], ["Bob", "99"])
 
     def test_verify_command_reports_stable_json_findings(self):
@@ -1209,6 +1252,41 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(payload["verify"]["summary"]["unsupported"], 1)
         self.assertEqual(payload["verify"]["findings"][0]["status"], "supported")
         self.assertEqual(payload["verify"]["findings"][1]["status"], "unsupported")
+        self.assertEqual(payload["verify"]["findings"][1]["polished_location"]["line"], 2)
+
+    def test_verify_human_output_groups_findings_by_status(self):
+        result = {
+            "summary": {"claims": 3, "supported": 1, "unsupported": 1, "uncertain": 1},
+            "findings": [
+                {
+                    "status": "supported",
+                    "claim": "Alice shipped 42 widgets.",
+                    "message": "supported",
+                    "transcript_anchor": "00:01",
+                    "polished_location": {"line": 1, "column": 3},
+                },
+                {
+                    "status": "unsupported",
+                    "claim": "Bob shipped 99 widgets.",
+                    "message": "unsupported",
+                    "transcript_anchor": None,
+                    "polished_location": {"line": 2, "column": 3},
+                },
+                {
+                    "status": "uncertain",
+                    "claim": "The strategy is risky.",
+                    "message": "uncertain",
+                    "transcript_anchor": None,
+                    "polished_location": {"line": 3, "column": 3},
+                },
+            ],
+        }
+
+        rendered = yt_scribe.render_verification(result)
+
+        self.assertLess(rendered.index("unsupported:"), rendered.index("\nuncertain:"))
+        self.assertLess(rendered.index("\nuncertain:"), rendered.index("\nsupported:"))
+        self.assertIn("- line 2: Bob shipped 99 widgets.", rendered)
 
     def test_init_project_writes_local_guidance_only(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

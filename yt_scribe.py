@@ -1005,15 +1005,32 @@ def strip_markdown_marker(line: str) -> str:
     return re.sub(r"^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)", "", line).strip()
 
 
-def split_polished_claims(text: str) -> list[str]:
-    claims: list[str] = []
-    for line in text.splitlines():
-        claim = strip_markdown_marker(line)
-        if not claim:
+def split_polished_claim_records(text: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        claim_line = strip_markdown_marker(line)
+        if not claim_line:
             continue
-        parts = re.split(r"(?<=[.!?])\s+", claim)
-        claims.extend(part.strip() for part in parts if part.strip())
-    return claims
+        base_column = line.find(claim_line) + 1 if claim_line in line else 1
+        for match in re.finditer(r"\S.*?(?:[.!?](?=\s+|$)|$)", claim_line):
+            claim = match.group(0).strip()
+            if not claim:
+                continue
+            leading_spaces = len(match.group(0)) - len(match.group(0).lstrip())
+            records.append(
+                {
+                    "claim": claim,
+                    "polished_location": {
+                        "line": line_number,
+                        "column": base_column + match.start() + leading_spaces,
+                    },
+                }
+            )
+    return records
+
+
+def split_polished_claims(text: str) -> list[str]:
+    return [record["claim"] for record in split_polished_claim_records(text)]
 
 
 def verification_terms(text: str) -> list[str]:
@@ -1127,6 +1144,7 @@ def verify_claim(
     transcript_text: str,
     transcript_entries: list[dict[str, str]],
     index: int,
+    polished_location: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     transcript_normalized = normalize_verification_text(transcript_text)
     claim_normalized = normalize_verification_text(claim)
@@ -1168,6 +1186,7 @@ def verify_claim(
         "status": status,
         "severity": severity,
         "claim": claim,
+        "polished_location": polished_location or {"line": None, "column": None},
         "message": message,
         "unsupported_terms": unsupported_terms,
         "transcript_anchor": anchor,
@@ -1177,8 +1196,14 @@ def verify_claim(
 def verify_polished_output(polished_text: str, transcript_text: str) -> dict[str, Any]:
     transcript_entries = transcript_entries_from_text(transcript_text)
     findings = [
-        verify_claim(claim, transcript_text, transcript_entries, index)
-        for index, claim in enumerate(split_polished_claims(polished_text), start=1)
+        verify_claim(
+            record["claim"],
+            transcript_text,
+            transcript_entries,
+            index,
+            record["polished_location"],
+        )
+        for index, record in enumerate(split_polished_claim_records(polished_text), start=1)
     ]
     summary = {
         "claims": len(findings),
@@ -1193,8 +1218,14 @@ def verify_polished_file(polished_path: str | Path, transcript_path: str | Path)
     polished_text = Path(polished_path).expanduser().read_text(encoding="utf-8")
     transcript = load_verification_transcript(transcript_path)
     findings = [
-        verify_claim(claim, transcript["text"], transcript["entries"], index)
-        for index, claim in enumerate(split_polished_claims(polished_text), start=1)
+        verify_claim(
+            record["claim"],
+            transcript["text"],
+            transcript["entries"],
+            index,
+            record["polished_location"],
+        )
+        for index, record in enumerate(split_polished_claim_records(polished_text), start=1)
     ]
     summary = {
         "claims": len(findings),
@@ -1213,11 +1244,17 @@ def render_verification(result: dict[str, Any]) -> str:
             f"unsupported: {summary['unsupported']}, uncertain: {summary['uncertain']}"
         )
     ]
-    for finding in result["findings"]:
-        anchor = f" [{finding['transcript_anchor']}]" if finding["transcript_anchor"] else ""
-        lines.append(
-            f"- {finding['status']}{anchor}: {finding['claim']}\n  {finding['message']}"
-        )
+    for status in ("unsupported", "uncertain", "supported"):
+        grouped = [finding for finding in result["findings"] if finding["status"] == status]
+        if not grouped:
+            continue
+        lines.append(f"{status}:")
+        for finding in grouped:
+            anchor = f" [{finding['transcript_anchor']}]" if finding["transcript_anchor"] else ""
+            location = finding.get("polished_location") or {}
+            line = location.get("line")
+            location_text = f"line {line}: " if line else ""
+            lines.append(f"- {location_text}{finding['claim']}{anchor}\n  {finding['message']}")
     return "\n".join(lines) + "\n"
 
 
@@ -1594,6 +1631,84 @@ def fetch_playlist_video_ids(
     if not video_ids:
         raise CliError("No videos were found in this playlist", "playlist_empty")
     return video_ids
+
+
+def has_video_id(value: str) -> bool:
+    try:
+        extract_video_id(value)
+    except CliError:
+        return False
+    return True
+
+
+def inspect_playlist_payload(
+    playlist_url: str,
+    proxy_config: GenericProxyConfig | None = None,
+    brief: bool = False,
+) -> dict[str, Any]:
+    playlist_id = playlist_id_from_url(playlist_url)
+    if not playlist_id:
+        raise CliError("No playlist id found in URL", "invalid_playlist_url")
+
+    videos: list[dict[str, Any]] = []
+    for video_id in fetch_playlist_video_ids(playlist_url, proxy_config):
+        try:
+            video = inspect_video_payload(video_id, proxy_config)
+            if brief:
+                video = {
+                    "id": video["id"],
+                    "url": video["url"],
+                    "has_captions": video["has_captions"],
+                    "caption_tracks": video["caption_tracks"],
+                    "languages": video["languages"],
+                    "manual_languages": video["manual_languages"],
+                    "auto_generated_languages": video["auto_generated_languages"],
+                }
+            video["ok"] = True
+        except CliError as exc:
+            video = {
+                "id": video_id,
+                "url": canonical_watch_url(video_id),
+                "ok": False,
+                "error": {
+                    "code": exc.code,
+                    "message": str(exc),
+                    **exc.details,
+                },
+            }
+        videos.append(video)
+
+    return {
+        "id": playlist_id,
+        "url": playlist_url,
+        "videos": videos,
+        "total": len(videos),
+        "with_captions": sum(1 for video in videos if video.get("has_captions")),
+        "inspect_failed": sum(1 for video in videos if not video.get("ok", True)),
+    }
+
+
+def render_playlist_inspection(playlist: dict[str, Any]) -> str:
+    lines = [
+        f"playlist: {playlist['id']}",
+        (
+            f"videos: {playlist['total']}, with captions: {playlist['with_captions']}, "
+            f"inspect failed: {playlist['inspect_failed']}"
+        ),
+    ]
+    for video in playlist["videos"]:
+        if video.get("ok", True):
+            languages = ", ".join(video.get("languages") or []) or "none"
+            lines.append(
+                f"- {video['id']}: captions "
+                f"{'yes' if video.get('has_captions') else 'no'} ({languages})"
+            )
+        else:
+            lines.append(
+                f"- {video['id']}: failed "
+                f"{video['error']['code']}: {video['error']['message']}"
+            )
+    return "\n".join(lines) + "\n"
 
 
 def expand_batch_items(
@@ -2615,7 +2730,14 @@ def handle_args(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "inspect":
-        video = inspect_video_payload(args.url, proxy_config_from_args(args))
+        proxy_config = proxy_config_from_args(args)
+        if args.playlist or (playlist_id_from_url(args.url) and not has_video_id(args.url)):
+            playlist = inspect_playlist_payload(args.url, proxy_config, args.brief)
+            payload = {"ok": playlist["inspect_failed"] == 0, "playlist": playlist}
+            emit(payload, args.json, render_playlist_inspection(playlist))
+            return 0 if playlist["inspect_failed"] == 0 else 1
+
+        video = inspect_video_payload(args.url, proxy_config)
         tracks = video["tracks"]
         payload = {
             "ok": True,
@@ -3260,6 +3382,11 @@ ai contract:
         "--brief",
         action="store_true",
         help="print the smallest useful caption availability summary",
+    )
+    inspect_parser.add_argument(
+        "--playlist",
+        action="store_true",
+        help="inspect playlist videos and caption availability before polishing",
     )
     add_proxy_flags(inspect_parser)
 
