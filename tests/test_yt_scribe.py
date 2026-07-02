@@ -1850,6 +1850,179 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(metadata["bundle_status"], "completed")
         self.assertEqual(metadata["engine"]["status"], "completed")
 
+    def test_codex_csv_fanout_writes_worker_results_and_merges(self):
+        transcript = self.deep_engine_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "run",
+                    "dQw4w9WgXcQ",
+                    "--workflow",
+                    "deep",
+                    "--agent-harness",
+                    "codex",
+                    "--bundle-dir",
+                    str(bundle_dir),
+                ],
+            )
+            stdout = io.StringIO()
+            merge_calls = []
+
+            def fake_fanout(jobs, **kwargs):
+                return {
+                    "results": [
+                        {
+                            "chunk_id": job["chunk_id"],
+                            "text": f"worker notes for {job['chunk_id']}\n",
+                        }
+                        for job in jobs
+                    ],
+                    "failures": [],
+                }
+
+            def fake_merge(**kwargs):
+                merge_calls.append(kwargs)
+                text = "merged fanout notes\n"
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], text),
+                    "chars": len(text),
+                    "harness": "codex",
+                    "text": text,
+                }
+
+            with (
+                patch.object(yt_scribe, "fetch_video_title", return_value="Fanout Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(yt_scribe, "run_codex_csv_fanout_jobs", side_effect=fake_fanout),
+                patch.object(yt_scribe, "run_agent_polish", side_effect=fake_merge),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            payload = json.loads(stdout.getvalue())
+            metadata = json.loads((bundle_dir / "metadata.json").read_text())
+            chunk_one_notes = (bundle_dir / "chunks" / "chunk-001-notes.md").read_text()
+
+        self.assertEqual(len(merge_calls), 1)
+        self.assertEqual(chunk_one_notes, "worker notes for chunk-001\n")
+        self.assertEqual(payload["run"]["chunking"]["engine"], "codex_csv_fanout")
+        self.assertEqual(metadata["engine"]["name"], "codex_csv_fanout")
+        self.assertEqual(metadata["codex_csv_fanout"]["status"], "completed")
+        self.assertFalse(metadata["codex_csv_fanout"]["fallback_used"])
+
+    def test_codex_csv_fanout_unavailable_falls_back_to_managed_engine(self):
+        transcript = self.deep_engine_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "run",
+                    "dQw4w9WgXcQ",
+                    "--workflow",
+                    "deep",
+                    "--agent-harness",
+                    "codex",
+                    "--bundle-dir",
+                    str(bundle_dir),
+                ],
+            )
+            stdout = io.StringIO()
+            calls = []
+
+            def fake_polish(**kwargs):
+                calls.append(Path(kwargs["out_path"]).name)
+                out_path = Path(kwargs["out_path"])
+                text = "merged notes\n" if out_path.name == "polished.md" else "chunk notes\n"
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], text),
+                    "chars": len(text),
+                    "harness": "codex",
+                    "text": text,
+                }
+
+            with (
+                patch.object(yt_scribe, "fetch_video_title", return_value="Fallback Fanout Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            payload = json.loads(stdout.getvalue())
+            metadata = json.loads((bundle_dir / "metadata.json").read_text())
+
+        self.assertEqual(calls, ["chunk-001-notes.md", "chunk-002-notes.md", "polished.md"])
+        self.assertEqual(payload["run"]["chunking"]["engine"], "managed_fallback")
+        self.assertEqual(metadata["codex_csv_fanout"]["status"], "fallback")
+        self.assertEqual(metadata["codex_csv_fanout"]["reason"], "codex_csv_fanout_unavailable")
+        self.assertTrue(metadata["codex_csv_fanout"]["fallback_used"])
+
+    def test_incomplete_codex_csv_fanout_falls_back_without_losing_notes(self):
+        transcript = self.deep_engine_transcript()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_dir = Path(tmp_dir) / "bundle"
+            args = yt_scribe.build_parser().parse_args(
+                [
+                    "--json",
+                    "run",
+                    "dQw4w9WgXcQ",
+                    "--workflow",
+                    "deep",
+                    "--agent-harness",
+                    "codex",
+                    "--bundle-dir",
+                    str(bundle_dir),
+                ],
+            )
+            stdout = io.StringIO()
+            fallback_calls = []
+
+            def partial_fanout(jobs, **kwargs):
+                return {
+                    "results": [{"chunk_id": jobs[0]["chunk_id"], "text": "fanout chunk one\n"}],
+                    "failures": [{"chunk_id": jobs[1]["chunk_id"], "message": "worker failed"}],
+                }
+
+            def fake_polish(**kwargs):
+                fallback_calls.append(Path(kwargs["out_path"]).name)
+                out_path = Path(kwargs["out_path"])
+                text = (
+                    "merged notes\n"
+                    if out_path.name == "polished.md"
+                    else "fallback chunk two\n"
+                )
+                return {
+                    "output_path": yt_scribe.write_text(kwargs["out_path"], text),
+                    "chars": len(text),
+                    "harness": "codex",
+                    "text": text,
+                }
+
+            with (
+                patch.object(yt_scribe, "fetch_video_title", return_value="Partial Fanout Talk"),
+                patch.object(yt_scribe, "fetch_transcript", return_value=transcript),
+                patch.object(yt_scribe, "run_codex_csv_fanout_jobs", side_effect=partial_fanout),
+                patch.object(yt_scribe, "run_agent_polish", side_effect=fake_polish),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(yt_scribe.handle_args(args), 0)
+
+            payload = json.loads(stdout.getvalue())
+            metadata = json.loads((bundle_dir / "metadata.json").read_text())
+            chunk_one_notes = (bundle_dir / "chunks" / "chunk-001-notes.md").read_text()
+
+        self.assertEqual(fallback_calls, ["chunk-002-notes.md", "polished.md"])
+        self.assertEqual(chunk_one_notes, "fanout chunk one\n")
+        self.assertEqual(payload["run"]["chunking"]["resumed_chunks"], 1)
+        self.assertEqual(metadata["codex_csv_fanout"]["status"], "fallback")
+        self.assertEqual(metadata["codex_csv_fanout"]["failures"][0]["chunk_id"], "chunk-002")
+
     def test_rename_custom_bundle_does_not_move_user_bundle_directory(self):
         transcript = self.sample_transcript()
 

@@ -1952,6 +1952,169 @@ def run_deep_fallback_engine(
     return merge_result
 
 
+def codex_csv_fanout_jobs(
+    manifest: dict[str, Any],
+    instruction: str,
+) -> list[dict[str, Any]]:
+    jobs = []
+    for chunk in manifest.get("chunks", []):
+        jobs.append(
+            {
+                "chunk_id": chunk["id"],
+                "text_path": chunk["text_path"],
+                "note_path": chunk["note_path"],
+                "start": chunk["start"],
+                "end": chunk["end"],
+                "instruction": (
+                    f"{instruction}\n\n"
+                    "CSV fan-out worker task:\n"
+                    f"- Read only {chunk['text_path']}.\n"
+                    f"- Produce detailed notes only for {chunk['id']} "
+                    f"covering {chunk['start']} to {chunk['end']}.\n"
+                    "- Return only markdown notes for this chunk."
+                ),
+            }
+        )
+    return jobs
+
+
+def run_codex_csv_fanout_jobs(
+    jobs: list[dict[str, Any]],
+    *,
+    instruction: str,
+    model: str | None,
+    cwd: str | None,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
+    raise CliError(
+        "Codex CSV fan-out is not available in this environment",
+        "codex_csv_fanout_unavailable",
+        {"jobs": len(jobs), "model": model, "cwd": cwd},
+    )
+
+
+def write_codex_csv_fanout_metadata(
+    bundle: dict[str, str],
+    *,
+    status: str,
+    fallback_used: bool,
+    failures: list[dict[str, Any]],
+    reason: str | None = None,
+) -> None:
+    metadata = read_json_file(bundle["metadata"])
+    metadata["codex_csv_fanout"] = {
+        "status": status,
+        "fallback_used": fallback_used,
+        "failures": failures,
+        "reason": reason,
+        "updated_at": utc_timestamp(),
+    }
+    write_bundle_metadata(bundle["metadata"], metadata)
+
+
+def run_codex_csv_fanout_engine(
+    *,
+    bundle: dict[str, str],
+    instruction: str,
+    out_path: str,
+    model: str | None,
+    cwd: str | None,
+    progress: ProgressReporter | None = None,
+) -> dict[str, Any]:
+    manifest = read_json_file(bundle["chunk_manifest"])
+    jobs = codex_csv_fanout_jobs(manifest, instruction)
+    fanout = run_codex_csv_fanout_jobs(
+        jobs,
+        instruction=instruction,
+        model=model,
+        cwd=cwd,
+        progress=progress,
+    )
+    results = {
+        str(result.get("chunk_id")): str(result.get("text") or "")
+        for result in fanout.get("results", [])
+        if result.get("chunk_id")
+    }
+    failures = list(fanout.get("failures") or [])
+    notes: list[tuple[str, str]] = []
+    chunk_results: list[dict[str, Any]] = []
+
+    for chunk in manifest.get("chunks", []):
+        chunk_id = str(chunk["id"])
+        note_text = results.get(chunk_id, "").strip()
+        note_path = Path(chunk["note_path"])
+        if not note_text:
+            failures.append({"chunk_id": chunk_id, "message": "worker returned no notes"})
+            chunk_results.append({"chunk_id": chunk_id, "status": "missing"})
+            continue
+        note_text = note_text + "\n"
+        write_text(str(note_path), note_text)
+        notes.append((chunk_id, note_text))
+        chunk_results.append(
+            {
+                "chunk_id": chunk_id,
+                "status": "succeeded",
+                "note_path": str(note_path),
+                "chars": len(note_text),
+            }
+        )
+
+    if failures:
+        write_codex_csv_fanout_metadata(
+            bundle,
+            status="fallback",
+            fallback_used=True,
+            failures=failures,
+            reason="codex_csv_fanout_incomplete",
+        )
+        raise CliError(
+            "Codex CSV fan-out did not produce all required chunk notes",
+            "codex_csv_fanout_incomplete",
+            {"failures": failures},
+        )
+
+    merge_result = run_agent_polish(
+        transcript_text=deep_merge_input(notes),
+        instruction=merge_chunk_instruction(instruction),
+        out_path=out_path,
+        model=model,
+        cwd=cwd,
+        harness="codex",
+        progress=progress,
+    )
+    metadata = read_json_file(bundle["metadata"])
+    metadata["bundle_status"] = "completed"
+    metadata["engine"] = {
+        "name": "codex_csv_fanout",
+        "status": "completed",
+        "harness": "codex",
+        "chunk_results": chunk_results,
+        "failures": [],
+        "merge_status": "merged",
+        "output_path": merge_result["output_path"],
+        "updated_at": utc_timestamp(),
+    }
+    metadata["codex_csv_fanout"] = {
+        "status": "completed",
+        "fallback_used": False,
+        "failures": [],
+        "reason": None,
+        "updated_at": utc_timestamp(),
+    }
+    write_bundle_metadata(bundle["metadata"], metadata)
+    merge_result["chunking"] = {
+        "enabled": True,
+        "engine": "codex_csv_fanout",
+        "chunk_chars": DEEP_CHUNK_MAX_CHARS,
+        "chunks": len(manifest.get("chunks") or []),
+        "merge_status": "merged",
+        "chunk_artifact_dir": bundle["chunks_dir"],
+        "resumed_chunks": 0,
+    }
+    merge_result["bundle_status"] = "completed"
+    return merge_result
+
+
 def data_dir(path: str | Path | None = None) -> Path:
     if path is not None:
         return Path(path).expanduser().resolve()
@@ -3751,16 +3914,45 @@ def handle_args(args: argparse.Namespace) -> int:
         progress.message(f"Using {harness_label(harness)}")
         if deep_bundle:
             try:
-                result = run_deep_fallback_engine(
-                    bundle=bundle,
-                    instruction=instruction.text,
-                    out_path=out_path,
-                    model=args.model,
-                    cwd=args.cd,
-                    harness=harness,
-                    resume=args.resume,
-                    progress=progress,
-                )
+                if harness == "codex":
+                    try:
+                        result = run_codex_csv_fanout_engine(
+                            bundle=bundle,
+                            instruction=instruction.text,
+                            out_path=out_path,
+                            model=args.model,
+                            cwd=args.cd,
+                            progress=progress,
+                        )
+                    except CliError as exc:
+                        write_codex_csv_fanout_metadata(
+                            bundle,
+                            status="fallback",
+                            fallback_used=True,
+                            failures=list(exc.details.get("failures") or []),
+                            reason=exc.code,
+                        )
+                        result = run_deep_fallback_engine(
+                            bundle=bundle,
+                            instruction=instruction.text,
+                            out_path=out_path,
+                            model=args.model,
+                            cwd=args.cd,
+                            harness=harness,
+                            resume=True,
+                            progress=progress,
+                        )
+                else:
+                    result = run_deep_fallback_engine(
+                        bundle=bundle,
+                        instruction=instruction.text,
+                        out_path=out_path,
+                        model=args.model,
+                        cwd=args.cd,
+                        harness=harness,
+                        resume=args.resume,
+                        progress=progress,
+                    )
             except CliError:
                 if managed_run is not None:
                     managed_run["status"] = "incomplete"
@@ -3881,6 +4073,7 @@ def handle_args(args: argparse.Namespace) -> int:
                     "front_matter_data": front_matter_data,
                     "chunking": result["chunking"],
                     "engine": existing_bundle_metadata.get("engine"),
+                    "codex_csv_fanout": existing_bundle_metadata.get("codex_csv_fanout"),
                     "cache": cache,
                     "managed_run": managed_run,
                     "records": records,
