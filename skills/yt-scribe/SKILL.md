@@ -5,7 +5,7 @@ description: Use when an agent needs to fetch a YouTube transcript, inspect avai
 
 # yt-scribe
 
-Use the installed `yt-scribe` CLI for YouTube transcript workflows.
+Use the installed `yt-scribe` CLI for YouTube transcript workflows. This skill teaches an agent how to use the CLI correctly.
 
 Prefer `--json` when reading command output for analysis or chaining.
 
@@ -16,7 +16,7 @@ Read exactly one harness file for command details:
 
 The CLI is human-first. Its default path should be the same obvious command a person would run:
 
-```powershell
+```sh
 yt-scribe run "<youtube-url>"
 ```
 
@@ -24,17 +24,17 @@ yt-scribe run "<youtube-url>"
 
 Verify the command exists and the local harness setup is available:
 
-```powershell
+```sh
 yt-scribe --json doctor
 ```
 
-If `yt-scribe` is missing, find the local checkout or install from the public repository, then run `install-local.ps1` on Windows if you want the wrapper on PATH.
+If `yt-scribe` is missing, install it from the public repository. From a checkout, run `sh ./install-local.sh` on Linux or macOS, or `.\install-local.ps1` on Windows, if you want the wrapper on PATH.
 
 ## Workflow
 
 For a new YouTube link:
 
-```powershell
+```sh
 yt-scribe --json inspect "<youtube-url>"
 yt-scribe --json fetch "<youtube-url>" --lang en --out transcript.txt
 yt-scribe --json polish transcript.txt --style notes --out notes.md
@@ -42,7 +42,7 @@ yt-scribe --json polish transcript.txt --style notes --out notes.md
 
 For the one-command path:
 
-```powershell
+```sh
 yt-scribe --json run "<youtube-url>"
 ```
 

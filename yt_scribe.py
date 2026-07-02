@@ -80,9 +80,9 @@ description: Polish transcript text passed by yt-scribe. Do not fetch captions.
 
 # yt-scribe Transcript Polisher
 
-Transform the transcript text already provided by `yt-scribe`. Do not fetch the video,
-inspect unrelated files, run shell commands, or call `yt-scribe`; that work belongs
-to the outer CLI workflow.
+Transform the transcript text already provided by `yt-scribe`. This skill is for the
+agent started by the CLI after the transcript has already been fetched. Do not fetch
+the video, inspect unrelated files, run shell commands, or call `yt-scribe`.
 
 Read exactly one harness file based on how the transcript was provided:
 
@@ -161,12 +161,12 @@ Use the installed `yt-scribe` CLI for YouTube transcript workflows. Prefer `--js
 when reading command output for analysis or chaining.
 
 For OpenCode-specific command details, follow `skills/yt-scribe/harness/opencode.md`
-in this repository when it is available. The inner polishing skill lives at
+in this repository when it is available. The transcript polishing skill lives at
 `.agents/skills/yt-scribe-transcript-polisher`.
 
 Default workflow:
 
-```powershell
+```sh
 yt-scribe --json inspect "<youtube-url>"
 yt-scribe --json fetch "<youtube-url>" --lang en --out transcript.txt
 yt-scribe --json polish transcript.txt --agent-harness opencode --style notes --out notes.md
@@ -174,7 +174,7 @@ yt-scribe --json polish transcript.txt --agent-harness opencode --style notes --
 
 One-command workflow:
 
-```powershell
+```sh
 yt-scribe --json run "<youtube-url>" --agent-harness opencode
 ```
 
@@ -190,11 +190,12 @@ permission:
   bash: deny
 ---
 
-You are the OpenCode transcript polisher for yt-scribe.
+You are the OpenCode transcript polisher started by yt-scribe after it fetches a
+transcript.
 
 Transform the transcript attached by `yt-scribe`. Read the attached transcript file
 as the source content. Do not fetch the video, inspect unrelated files, run shell
-commands, or call `yt-scribe`; that work belongs to the outer CLI workflow.
+commands, or call `yt-scribe`.
 
 For OpenCode-specific polish behavior, follow
 `.agents/skills/yt-scribe-transcript-polisher/harness/opencode.md` in this
@@ -660,7 +661,7 @@ def harness_asset_targets() -> dict[str, Path]:
     }
 
 
-def install_harness_assets() -> dict[str, Any]:
+def install_skills() -> dict[str, Any]:
     installed = []
     for relative_path, target in harness_asset_targets().items():
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -680,7 +681,7 @@ def install_harness_assets() -> dict[str, Any]:
     }
 
 
-def harness_assets_payload() -> dict[str, Any]:
+def skills_payload() -> dict[str, Any]:
     targets = harness_asset_targets()
     return {
         "agents_skills_dir": str(agents_skills_dir()),
@@ -771,8 +772,18 @@ def agent_harness_status() -> dict[str, Any]:
     }
 
 
+def install_bin_dir() -> Path:
+    return Path.home() / ".local" / "bin"
+
+
+def local_install_command() -> str:
+    if sys.platform == "win32":
+        return ".\\install-local.ps1"
+    return "sh ./install-local.sh"
+
+
 def doctor_payload() -> dict[str, Any]:
-    install_dir = str(Path.home() / ".local" / "bin")
+    install_dir = str(install_bin_dir())
     path_parts = [
         str(Path(part).resolve())
         for part in os.environ.get("PATH", "").split(os.pathsep)
@@ -811,9 +822,10 @@ def doctor_payload() -> dict[str, Any]:
             "wrapper_dir": install_dir,
             "wrapper_dir_on_path": str(Path(install_dir).resolve()) in path_parts,
             "resolved_command": command_path(COMMAND_NAME),
+            "local_install_command": local_install_command(),
         },
         "config": config_payload(),
-        "harness_assets": harness_assets_payload(),
+        "skills": skills_payload(),
         "lifecycle": lifecycle_steps(),
     }
 
@@ -1049,12 +1061,12 @@ def selected_agent_harness(args: argparse.Namespace) -> str:
 
 
 def handle_args(args: argparse.Namespace) -> int:
-    if args.command == "install-harness-assets":
-        payload = {"ok": True, "harness_assets": install_harness_assets()}
+    if args.command == "install-skills":
+        payload = {"ok": True, "skills": install_skills()}
         text = (
-            f"Installed harness assets:\n"
-            f"  agents skills: {payload['harness_assets']['agents_skills_dir']}\n"
-            f"  OpenCode agents: {payload['harness_assets']['opencode_agents_dir']}\n"
+            f"Installed skills:\n"
+            f"  agent skills: {payload['skills']['agents_skills_dir']}\n"
+            f"  OpenCode agents: {payload['skills']['opencode_agents_dir']}\n"
         )
         emit(payload, args.json, text)
         return 0
@@ -1286,7 +1298,7 @@ ai contract:
 """
     parser = argparse.ArgumentParser(
         prog=COMMAND_NAME,
-        description="Human-first CLI for turning YouTube links into Codex-polished notes.",
+        description="Human-first CLI for turning YouTube links into agent-polished notes.",
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1310,10 +1322,10 @@ ai contract:
         help="config key to clear",
     )
 
-    subparsers.add_parser("doctor", help="check Codex, Python, and PATH setup")
+    subparsers.add_parser("doctor", help="check Python, agent harnesses, skills, and PATH setup")
     subparsers.add_parser(
-        "install-harness-assets",
-        help="install global inner-agent skills and OpenCode agents",
+        "install-skills",
+        help="install global yt-scribe skills and OpenCode agents",
     )
     subparsers.add_parser("lifecycle", help="print the recommended workflow")
 
@@ -1323,7 +1335,7 @@ ai contract:
     )
     inspect_parser.add_argument("url", help="YouTube URL or 11-character video ID")
 
-    fetch_parser = subparsers.add_parser("fetch", help="download the transcript without Codex")
+    fetch_parser = subparsers.add_parser("fetch", help="download the transcript without an agent")
     fetch_parser.add_argument("url", help="YouTube URL or 11-character video ID")
     fetch_parser.add_argument("--lang", default="en", help="caption language code, default: en")
     fetch_parser.add_argument("--format", choices=["text", "json", "srt"], default="text")
@@ -1331,7 +1343,7 @@ ai contract:
 
     polish_parser = subparsers.add_parser(
         "polish",
-        help="polish an existing transcript with codex exec",
+        help="polish an existing transcript with the configured agent",
     )
     polish_parser.add_argument("file", help="transcript file to polish")
     add_polish_flags(polish_parser)

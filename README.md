@@ -19,11 +19,17 @@ It uses public YouTube caption tracks when they are available through `youtube-t
 
 From GitHub:
 
-```powershell
+```sh
 pip install git+https://github.com/Berkay2002/yt-scribe.git
 ```
 
 For local development or immediate use from a checkout:
+
+```sh
+sh ./install-local.sh
+```
+
+On Windows, use PowerShell:
 
 ```powershell
 .\install-local.ps1
@@ -31,36 +37,41 @@ For local development or immediate use from a checkout:
 
 Check your setup:
 
-```powershell
+```sh
 yt-scribe doctor
 ```
 
-Install global harness assets for inner agent runs:
+Install global skills:
 
-```powershell
-yt-scribe install-harness-assets
+```sh
+yt-scribe install-skills
 ```
 
 This copies the transcript-polisher skill to `~/.agents/skills/yt-scribe-transcript-polisher` and the OpenCode agents to OpenCode's global agents directory. This is needed when the globally installed CLI is used from projects that do not contain this repository's `.agents` or `.opencode` folders.
 
 `yt-scribe` uses `youtube-transcript-api` for caption access. Maintainers can install test and lint tools with:
 
-```powershell
-pip install -e .[dev]
+```sh
+pip install -e ".[dev]"
 ```
 
 Run normal tests:
 
-```powershell
+```sh
 python -m pytest
 python -m ruff check .
 ```
 
 Run the real YouTube and agent harness e2e test:
 
+```sh
+YT_SCRIBE_RUN_E2E=1 python -m pytest tests/test_e2e.py -q -s
+```
+
+On Windows PowerShell:
+
 ```powershell
-$env:YT_SCRIBE_RUN_E2E = "1"
-python -m pytest tests/test_e2e.py -q -s
+$env:YT_SCRIBE_RUN_E2E = "1"; python -m pytest tests/test_e2e.py -q -s
 ```
 
 The e2e test fetches a real transcript and runs both Codex and OpenCode when they are installed. It is opt-in because it uses network access and live agent calls.
@@ -69,7 +80,7 @@ The e2e test fetches a real transcript and runs both Codex and OpenCode when the
 
 Fetch and polish a video in one command:
 
-```powershell
+```sh
 yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
@@ -77,19 +88,19 @@ By default this creates `yt-scribe-VIDEO_ID-notes.md` in the current directory.
 
 Keep the raw transcript too:
 
-```powershell
+```sh
 yt-scribe run "https://www.youtube.com/watch?v=VIDEO_ID" --transcript transcript.txt
 ```
 
 Download only the transcript:
 
-```powershell
+```sh
 yt-scribe fetch "https://www.youtube.com/watch?v=VIDEO_ID" --out transcript.txt
 ```
 
 Polish an existing transcript:
 
-```powershell
+```sh
 yt-scribe polish transcript.txt --style summary --out summary.md
 ```
 
@@ -97,7 +108,7 @@ yt-scribe polish transcript.txt --style summary --out summary.md
 
 `yt-scribe` is easiest to understand as a small pipeline:
 
-```powershell
+```sh
 yt-scribe doctor
 yt-scribe inspect "<youtube-url>"
 yt-scribe fetch "<youtube-url>" --out transcript.txt
@@ -107,7 +118,7 @@ yt-scribe run "<youtube-url>"
 
 Run this any time to print the same lifecycle from the CLI:
 
-```powershell
+```sh
 yt-scribe lifecycle
 ```
 
@@ -127,7 +138,7 @@ Downloads the transcript without calling Codex.
 
 Useful options:
 
-```powershell
+```sh
 yt-scribe fetch "<url>" --lang en --format text --out transcript.txt
 yt-scribe fetch "<url>" --format srt --out captions.srt
 yt-scribe fetch "<url>" --format json --out transcript.json
@@ -137,7 +148,7 @@ yt-scribe fetch "<url>" --format json --out transcript.json
 
 Uses the configured agent harness to polish an existing transcript. The built-in default is Codex.
 
-```powershell
+```sh
 yt-scribe polish transcript.txt --style clean --out clean.txt
 yt-scribe polish transcript.txt --style notes --out notes.md
 yt-scribe polish transcript.txt --style summary --out summary.md
@@ -149,7 +160,7 @@ yt-scribe polish transcript.txt --agent-harness opencode --out notes.md
 
 Fetches the transcript and polishes it in one command.
 
-```powershell
+```sh
 yt-scribe run "<url>"
 yt-scribe run "<url>" --style summary
 yt-scribe run "<url>" --stdout
@@ -161,7 +172,7 @@ yt-scribe run "<url>" --agent-harness opencode
 
 Shows or edits the persisted yt-scribe config.
 
-```powershell
+```sh
 yt-scribe config
 yt-scribe config set default-agent-harness opencode
 yt-scribe config unset default-agent-harness
@@ -169,20 +180,20 @@ yt-scribe config unset default-agent-harness
 
 Without config, `yt-scribe` uses Codex. A config default changes future `polish` and `run` commands unless a command passes `--agent-harness` explicitly.
 
-`install-harness-assets`
+`install-skills`
 
-Installs the inner transcript-polisher skill and OpenCode agents into global user-level locations.
+Installs the transcript-polisher skill and OpenCode agents into global user-level locations.
 
-```powershell
-yt-scribe install-harness-assets
-yt-scribe --json install-harness-assets
+```sh
+yt-scribe install-skills
+yt-scribe --json install-skills
 ```
 
 `raw <url>`
 
 Read-only diagnostic escape hatch for inspecting the selected YouTube timedtext caption URL. Most users do not need this because normal transcript fetching uses `youtube-transcript-api`.
 
-```powershell
+```sh
 yt-scribe raw "<url>" --lang en
 ```
 
@@ -190,7 +201,7 @@ yt-scribe raw "<url>" --lang en
 
 Put `--json` before the command:
 
-```powershell
+```sh
 yt-scribe --json doctor
 yt-scribe --json inspect "<url>"
 yt-scribe --json fetch "<url>" --out transcript.txt
@@ -204,7 +215,7 @@ Successful commands return:
   "ok": true,
   "fetch": {
     "video_id": "VIDEO_ID",
-    "output_path": "C:\\path\\transcript.txt"
+    "output_path": "/path/to/transcript.txt"
   }
 }
 ```
@@ -245,24 +256,29 @@ When the project-local OpenCode agent is available, `yt-scribe` also passes:
 
 The final text is read from OpenCode JSON events. Run `yt-scribe doctor` to check whether `codex` and `opencode` are available and whether their auth commands report usable local configuration.
 
-If the optional plugin skills are installed, the inner agent uses `yt-scribe-transcript-polisher` for the transcript rewrite. The skill has harness-specific notes so Codex and OpenCode do not need to read each other's command details.
+There are two skills:
+
+- `yt-scribe`: teaches an agent how to use the CLI correctly.
+- `yt-scribe-transcript-polisher`: guides the agent started by the CLI to polish the fetched transcript.
+
+Each skill keeps Codex and OpenCode notes in separate files, so each tool sees only the details it needs.
 
 ## Plugin Skills
 
 This repository also contains plugin skills:
 
-- `.opencode/agents/yt-scribe.md`: OpenCode-facing outer agent.
-- `.opencode/agents/yt-scribe-transcript-polisher.md`: OpenCode-facing inner polishing agent.
-- `skills/yt-scribe`: plugin-facing outer skill for an agent that wants to use the CLI.
-- `skills/yt-scribe/harness/codex.md`: Codex-specific outer CLI instructions.
-- `skills/yt-scribe/harness/opencode.md`: OpenCode-specific outer CLI instructions.
-- `.agents/skills/yt-scribe-transcript-polisher`: inner agent skill for transcript rewriting.
+- `.opencode/agents/yt-scribe.md`: OpenCode agent for using the CLI.
+- `.opencode/agents/yt-scribe-transcript-polisher.md`: OpenCode agent for polishing transcripts.
+- `skills/yt-scribe`: plugin skill for using the CLI.
+- `skills/yt-scribe/harness/codex.md`: Codex-specific CLI instructions.
+- `skills/yt-scribe/harness/opencode.md`: OpenCode-specific CLI instructions.
+- `.agents/skills/yt-scribe-transcript-polisher`: skill for transcript rewriting.
 - `.agents/skills/yt-scribe-transcript-polisher/harness/codex.md`: Codex stdin polishing instructions.
 - `.agents/skills/yt-scribe-transcript-polisher/harness/opencode.md`: OpenCode attached-file polishing instructions.
 
-The split matters. The outer agent fetches, saves, and chains commands. The inner agent only transforms transcript text and should not fetch videos or run shell commands.
+The split matters. One skill explains how to run the CLI correctly. The transcript-polisher skill is only for the agent started by the CLI after the transcript has already been fetched.
 
-When the CLI is installed globally, project-local `.agents` and `.opencode` folders are not automatically available to inner agent runs in other projects. Run `yt-scribe install-harness-assets` to install the inner assets globally.
+When the CLI is installed globally, project-local `.agents` and `.opencode` folders are not automatically available in other projects. Run `yt-scribe install-skills` to install the skill files globally.
 
 The plugin files live in this repository under `.codex-plugin/` and `skills/`.
 

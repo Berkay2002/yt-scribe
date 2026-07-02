@@ -84,7 +84,7 @@ class YtScribeTests(unittest.TestCase):
         steps = [item["step"] for item in yt_scribe.lifecycle_steps()]
         self.assertEqual(steps, ["check", "inspect", "fetch", "polish", "run"])
 
-    def test_builtin_style_prompts_trigger_inner_polisher_skill(self):
+    def test_builtin_style_prompts_trigger_transcript_polisher_skill(self):
         for style in yt_scribe.STYLE_INSTRUCTIONS:
             instruction = yt_scribe.style_instruction(style, "codex")
             self.assertIn("yt-scribe-transcript-polisher", instruction)
@@ -177,6 +177,34 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(payload["agent_harness"]["default"], "codex")
         self.assertTrue(payload["agent_harness"]["harnesses"]["codex"]["available"])
         self.assertFalse(payload["agent_harness"]["harnesses"]["opencode"]["available"])
+
+    def test_local_install_metadata_is_platform_specific(self):
+        with patch.object(yt_scribe.sys, "platform", "linux"):
+            self.assertEqual(yt_scribe.local_install_command(), "sh ./install-local.sh")
+            self.assertEqual(yt_scribe.install_bin_dir(), Path.home() / ".local" / "bin")
+
+        with patch.object(yt_scribe.sys, "platform", "darwin"):
+            self.assertEqual(yt_scribe.local_install_command(), "sh ./install-local.sh")
+            self.assertEqual(yt_scribe.install_bin_dir(), Path.home() / ".local" / "bin")
+
+        with patch.object(yt_scribe.sys, "platform", "win32"):
+            self.assertEqual(yt_scribe.local_install_command(), ".\\install-local.ps1")
+            self.assertEqual(yt_scribe.install_bin_dir(), Path.home() / ".local" / "bin")
+
+    def test_doctor_payload_reports_platform_install_command(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                patch.dict(
+                    os.environ,
+                    {"YT_SCRIBE_CONFIG": str(Path(tmp_dir) / "config.json")},
+                ),
+                patch.object(yt_scribe.sys, "platform", "darwin"),
+                patch.object(yt_scribe, "command_path", return_value=None),
+            ):
+                payload = yt_scribe.doctor_payload()
+
+        self.assertEqual(payload["install"]["local_install_command"], "sh ./install-local.sh")
+        self.assertEqual(Path(payload["install"]["wrapper_dir"]), yt_scribe.install_bin_dir())
 
     def test_selected_agent_harness_uses_config_unless_cli_overrides(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

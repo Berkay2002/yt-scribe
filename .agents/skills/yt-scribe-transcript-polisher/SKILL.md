@@ -5,7 +5,7 @@ description: Use when `yt-scribe polish` or `yt-scribe run` invokes an agent to 
 
 # yt-scribe Transcript Polisher
 
-Transform the transcript text already provided by `yt-scribe`. Do not fetch the video, inspect unrelated files, run shell commands, or call `yt-scribe`; that work belongs to the outer CLI workflow.
+Transform the transcript text already provided by `yt-scribe`. This skill is for the agent started by the CLI after the transcript has already been fetched. Do not fetch the video, inspect unrelated files, run shell commands, or call `yt-scribe`.
 
 Read exactly one harness file based on how the transcript was provided:
 
