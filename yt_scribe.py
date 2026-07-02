@@ -160,6 +160,7 @@ For the one-command path:
 yt-scribe --json run "<youtube-url>"
 yt-scribe --json run "<youtube-url>" --focus "Keep only action items"
 yt-scribe --json run "<youtube-url>" --timestamps
+yt-scribe --json run "<youtube-url>" --bundle-dir .yt-scribe/runs/VIDEO_ID
 ```
 
 Use styles intentionally:
@@ -176,6 +177,23 @@ or `--prompt-file` only when the user needs to replace the whole polishing promp
 Use `--timestamps` when the user needs polished output with source anchors. For
 `run`, yt-scribe passes transcript segment start times to the polisher. For
 `polish`, the input transcript should already contain useful timestamp anchors.
+
+Use `verify` when the user needs a conservative transcript-backed check:
+
+```sh
+yt-scribe --json verify notes.md --transcript transcript.json
+```
+
+Use profiles and templates for repeated local conventions:
+
+```sh
+yt-scribe config profile set research --style notes --template research --langs en,en-US
+yt-scribe --json run "<youtube-url>" --profile research
+```
+
+Use `--chunk-chars` only for long transcripts that need chunk-and-merge polishing.
+Use `batch` for URL lists; playlist URLs in a batch file expand into normal batch
+items.
 
 ## Safety
 

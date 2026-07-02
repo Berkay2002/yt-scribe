@@ -178,6 +178,13 @@ yt-scribe --json setup
 
 Resolves the YouTube video and lists caption tracks.
 
+Use `--brief` when an agent or script only needs caption availability and
+language codes:
+
+```sh
+yt-scribe inspect "<url>" --brief
+```
+
 `fetch <url>`
 
 Downloads the transcript without calling Codex.
@@ -201,6 +208,8 @@ yt-scribe polish transcript.txt --style summary --out summary.md
 yt-scribe polish transcript.txt --style article --out article.md
 yt-scribe polish transcript.txt --focus "Focus on concrete takeaways" --out notes.md
 yt-scribe polish transcript.txt --focus-file instructions.md --out notes.md
+yt-scribe polish transcript.txt --template lecture --out lecture-notes.md
+yt-scribe polish transcript.txt --timestamps --out anchored-notes.md
 yt-scribe polish transcript.txt --agent-harness opencode --out notes.md
 ```
 
@@ -218,6 +227,7 @@ Fetches the transcript and polishes it in one command.
 yt-scribe run "<url>"
 yt-scribe run "<url>" --style summary
 yt-scribe run "<url>" --focus "Extract only action items and owner names"
+yt-scribe run "<url>" --timestamps
 yt-scribe run "<url>" --stdout
 yt-scribe run "<url>" --transcript transcript.txt --out notes.md
 yt-scribe run "<url>" --agent-harness opencode
@@ -235,9 +245,15 @@ Shows or edits the persisted yt-scribe config.
 yt-scribe config
 yt-scribe config set default-agent-harness opencode
 yt-scribe config unset default-agent-harness
+yt-scribe config profile set research --style notes --template research --langs en,en-US
+yt-scribe config profile get research
+yt-scribe config profile remove research
 ```
 
 Without config, `yt-scribe` uses Codex. A config default changes future `polish` and `run` commands unless a command passes `--agent-harness` explicitly.
+Named profiles can also provide defaults for repeated workflows. `run`, `polish`,
+and `batch` accept `--profile <name>`, and command-line flags override profile
+values where the CLI can distinguish them.
 
 `install-skills`
 
@@ -246,6 +262,27 @@ Installs only the shared agent skills into `~/.agents/skills`. Most users should
 ```sh
 yt-scribe install-skills
 yt-scribe --json install-skills
+```
+
+`init-project`
+
+Writes repo-local `yt-scribe` guidance under `.yt-scribe/` without editing root
+project docs.
+
+```sh
+yt-scribe init-project
+yt-scribe init-project --profile research
+```
+
+`verify <file>`
+
+Compares polished output with a transcript artifact and reports conservative
+supported, unsupported, and uncertain findings. It accepts raw text, timestamped
+text, transcript JSON, or segment JSON.
+
+```sh
+yt-scribe verify notes.md --transcript transcript.json
+yt-scribe --json verify notes.md --transcript transcript.txt
 ```
 
 `raw <url>`
@@ -263,8 +300,13 @@ and agent automation. The normal `yt-scribe run "<url>"` path does not require t
 
 - `--langs`: ordered caption language fallback.
 - `--front-matter`: factual metadata at the top of polished markdown.
+- `--timestamps`: source anchors in polished output.
+- `--template` and `--profile`: repeatable output structure and workflow defaults.
 - `--cache-dir` and `--resume`: explicit transcript cache reuse.
-- `batch`: process a plain text URL list and write a manifest.
+- `--chunk-chars`: chunk-and-merge polishing for long transcripts.
+- `--bundle-dir`: write transcript, polished output, and metadata together.
+- `verify`: check polished output against a transcript artifact.
+- `batch`: process URL lists or playlist URLs and write a manifest.
 
 <details>
 <summary>Examples for power users and agent workflows</summary>
@@ -298,7 +340,21 @@ yt-scribe batch videos.txt --out-dir notes --manifest notes/manifest.json --resu
 ```
 
 Batch input is one YouTube URL or video ID per line. Blank lines and lines starting
-with `#` are ignored. The manifest records succeeded, failed, and skipped items.
+with `#` are ignored. Playlist URLs are expanded into ordinary batch items. The
+manifest records succeeded, failed, and skipped items.
+
+Use chunking when a transcript is too long for a dependable single polish pass:
+
+```sh
+yt-scribe run "<youtube-url>" --chunk-chars 60000 --out notes.md
+yt-scribe batch videos.txt --out-dir notes --manifest notes/manifest.json --chunk-chars 60000
+```
+
+Keep a run's artifacts together:
+
+```sh
+yt-scribe run "<youtube-url>" --bundle-dir .yt-scribe/runs/VIDEO_ID
+```
 
 </details>
 
