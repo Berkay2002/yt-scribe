@@ -3077,8 +3077,7 @@ class YtScribeTests(unittest.TestCase):
             stdout = io.StringIO()
 
             with (
-                patch.object(
-                    package,
+                patch_cli_workflow(
                     "fetch_playlist_video_ids",
                     return_value=["dQw4w9WgXcQ"],
                 ),
@@ -3124,8 +3123,7 @@ class YtScribeTests(unittest.TestCase):
             stdout = io.StringIO()
 
             with (
-                patch.object(
-                    package,
+                patch_cli_workflow(
                     "fetch_playlist_video_ids",
                     side_effect=package.CliError("No videos were found", "playlist_empty"),
                 ),

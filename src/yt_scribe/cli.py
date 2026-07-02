@@ -1,17 +1,334 @@
 """CLI adapter for yt-scribe."""
 
-# ruff: noqa: F821
-
 from __future__ import annotations
 
+import argparse
+import json
+import re
 import sys
+from pathlib import Path
+from typing import Any
 
-# Keep CLI behavior on the same compatibility surface while migration slices move
-# workflow implementations out of the package root.
-_core = sys.modules[__package__]
-globals().update(
-    {name: value for name, value in vars(_core).items() if not name.startswith("__")}
+from youtube_transcript_api.proxies import GenericProxyConfig
+
+from . import CliError, PolishInstruction, PolishOptions, ProgressReporter
+from .batch import (
+    batch_output_path,
+    default_polish_output_path,
+    default_run_output_path,
+    expand_batch_items,
+    read_batch_urls,
 )
+from .config import (
+    AGENT_HARNESSES,
+    DEFAULT_AGENT_HARNESS,
+    HTTP_PROXY_ENV_VAR,
+    HTTPS_PROXY_ENV_VAR,
+    VERSION,
+    apply_profile,
+    cache_dir_from_args,
+    config_path,
+    config_payload,
+    doctor_payload,
+    effective_agent_harness,
+    get_profile,
+    lifecycle_steps,
+    profile_from_args,
+    proxy_config_from_args,
+    read_config,
+    read_config_file,
+    write_config,
+)
+from .polish import (
+    chunking_disabled_payload,
+    opencode_server_config,
+    run_agent_polish,
+    run_chunked_agent_polish,
+    run_codex_csv_fanout_engine,
+    run_deep_fallback_engine,
+    run_opencode_server_engine,
+    write_codex_csv_fanout_metadata,
+    write_opencode_server_metadata,
+)
+from .runs import (
+    ask_agent_instruction,
+    bundle_paths,
+    deep_next_commands,
+    load_run_registry,
+    read_json_file,
+    rename_run,
+    render_ask_context,
+    resolve_run_selector,
+    retrieve_run_context,
+    run_record_for_deep_workflow,
+    run_registry_path,
+    update_run_record,
+    write_bundle_metadata,
+    write_deep_bundle_plan,
+    write_text,
+)
+from .setup import install_skills, setup_payload
+from .transcripts import (
+    load_or_fetch_transcript,
+    render_timestamped_transcript,
+    render_transcript,
+    split_transcript_chunks,
+)
+from .verify import render_verification, verify_polished_file
+from .youtube import (
+    canonical_watch_url,
+    choose_track,
+    extract_video_id,
+    fetch_raw_caption_tracks,
+    fetch_video_duration_seconds,
+    fetch_video_title,
+    http_get,
+    list_transcript_tracks,
+    requested_languages,
+    select_run_workflow,
+    timedtext_url,
+)
+
+COMMAND_NAME = "yt-scribe"
+RUN_WORKFLOWS = ("auto", "quick", "deep")
+
+STYLE_INSTRUCTIONS = {
+    "clean": (
+        "Clean this YouTube transcript. Remove filler, repeated phrases, "
+        "timestamps, caption artifacts, and obvious speech disfluencies. "
+        "Preserve the speaker's meaning and order. Do not add facts that are "
+        "not in the transcript. Return only the cleaned text."
+    ),
+    "notes": (
+        "Turn this YouTube transcript into clear markdown notes. Preserve the "
+        "meaning and order. Use concise headings and bullets where helpful. "
+        "Remove filler and caption artifacts. Do not add facts that are not in "
+        "the transcript."
+    ),
+    "summary": (
+        "Summarize this YouTube transcript in plain markdown. Include the main "
+        "ideas, key details, and any concrete action items. Do not add facts "
+        "that are not in the transcript."
+    ),
+    "article": (
+        "Rewrite this YouTube transcript as a readable article in markdown. "
+        "Preserve the argument and sequence, remove filler, and avoid adding "
+        "facts that are not in the transcript."
+    ),
+}
+TIMESTAMP_GROUNDING_INSTRUCTION = (
+    "Timestamp grounding is requested. When the transcript includes timestamp anchors "
+    "such as [01:23], preserve useful anchors in the polished output so important "
+    "claims can be traced back to the transcript. Do not invent timestamps, and do "
+    "not add timestamp anchors for claims that are not supported by nearby transcript text."
+)
+TEMPLATE_INSTRUCTIONS = {
+    "lecture": (
+        "Use a lecture notes structure with concise section headings, key concepts, "
+        "definitions, examples, and open questions when they are present in the transcript."
+    ),
+    "research": (
+        "Use a research notes structure with claims, evidence, methods, limitations, "
+        "and follow-up questions when they are present in the transcript."
+    ),
+    "meeting": (
+        "Use a meeting-style structure with decisions, risks, action items, owners, "
+        "and deadlines only when they are present in the transcript."
+    ),
+}
+INNER_POLISHER_SKILL = "yt-scribe-transcript-polisher"
+HARNESS_INSTRUCTIONS = {
+    "codex": "harness/codex.md",
+    "opencode": "harness/opencode.md",
+}
+TRANSCRIPT_DELIVERY = {
+    "codex": "stdin",
+    "opencode": "an attached transcript file",
+}
+
+
+def inspect_video_payload(
+    url_or_id: str,
+    proxy_config: GenericProxyConfig | None = None,
+) -> dict[str, Any]:
+    video_id = extract_video_id(url_or_id)
+    duration_seconds = fetch_video_duration_seconds(video_id, proxy_config)
+    try:
+        tracks = list_transcript_tracks(video_id, proxy_config=proxy_config)
+    except CliError:
+        tracks = fetch_raw_caption_tracks(video_id, proxy_config)
+
+    manual_languages = [track.language_code for track in tracks if not track.auto_generated]
+    auto_generated_languages = [track.language_code for track in tracks if track.auto_generated]
+    return {
+        "id": video_id,
+        "url": canonical_watch_url(video_id),
+        "duration_seconds": duration_seconds,
+        "has_captions": bool(tracks),
+        "caption_tracks": len(tracks),
+        "languages": [track.language_code for track in tracks],
+        "manual_languages": manual_languages,
+        "auto_generated_languages": auto_generated_languages,
+        "tracks": [track.public_dict() for track in tracks],
+    }
+
+
+def fetch_transcript_payload(
+    url_or_id: str,
+    languages: list[str],
+    output_format: str,
+    cache_dir: Path | None = None,
+    resume: bool = False,
+    proxy_config: GenericProxyConfig | None = None,
+    timestamps: bool = False,
+    out_path: str | None = None,
+    include_transcript: bool = False,
+) -> tuple[dict[str, Any], str]:
+    if output_format not in {"text", "json", "srt"}:
+        raise CliError(
+            f"Unsupported transcript format: {output_format}",
+            "invalid_transcript_format",
+            {"format": output_format},
+        )
+
+    transcript, cache = load_or_fetch_transcript(
+        url_or_id,
+        languages,
+        cache_dir,
+        resume,
+        proxy_config,
+    )
+    rendered = (
+        render_timestamped_transcript(transcript) + "\n"
+        if timestamps and output_format == "text"
+        else render_transcript(transcript, output_format)
+    )
+    output_path = write_text(out_path, rendered)
+    fetch_payload = {
+        "video_id": transcript["video_id"],
+        "url": transcript["url"],
+        "language": transcript["language"],
+        "requested_languages": transcript["requested_languages"],
+        "track": transcript["track"],
+        "segments": len(transcript["segments"]),
+        "chars": len(transcript["text"]),
+        "source": transcript.get("source"),
+        "format": output_format,
+        "timestamped": timestamps and output_format == "text",
+        "output_path": output_path,
+        "cache": cache,
+    }
+    if include_transcript:
+        fetch_payload["transcript"] = rendered
+    return fetch_payload, rendered
+
+
+def init_project(project_dir: str | Path, profile: str | None = None) -> dict[str, Any]:
+    root = Path(project_dir).expanduser().resolve()
+    yt_scribe_dir = root / ".yt-scribe"
+    yt_scribe_dir.mkdir(parents=True, exist_ok=True)
+    guidance_path = yt_scribe_dir / "AGENTS.md"
+    config_path = yt_scribe_dir / "config.json"
+    guidance = (
+        "# yt-scribe\n\n"
+        "Use `yt-scribe` for YouTube transcript workflows in this project.\n\n"
+        "- Prefer `yt-scribe run \"<youtube-url>\"` for one-command notes.\n"
+        "- Use `yt-scribe inspect \"<youtube-url>\" --brief` before assuming captions exist.\n"
+        "- Do not bypass private, disabled, unavailable, or missing caption tracks.\n"
+        "- Do not add facts that are not in the transcript.\n"
+    )
+    guidance_path.write_text(guidance, encoding="utf-8")
+    config = {"profiles": {}}
+    if profile:
+        config["profiles"][profile] = {
+            "style": "notes",
+            "template": "research",
+            "front_matter": True,
+        }
+    config_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "dir": str(yt_scribe_dir),
+        "guidance_path": str(guidance_path),
+        "config_path": str(config_path),
+    }
+
+
+def front_matter_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    text = str(value)
+    if not text:
+        return '""'
+    if re.search(r"[:#\n\r\[\]{}]", text):
+        return json.dumps(text, ensure_ascii=False)
+    return text
+
+
+def render_front_matter(data: dict[str, Any]) -> str:
+    lines = ["---"]
+    for key, value in data.items():
+        if isinstance(value, list):
+            lines.append(f"{key}:")
+            if value:
+                lines.extend(f"  - {front_matter_scalar(item)}" for item in value)
+            else:
+                lines.append("  []")
+        else:
+            lines.append(f"{key}: {front_matter_scalar(value)}")
+    lines.append("---")
+    return "\n".join(lines) + "\n\n"
+
+
+def run_front_matter_data(
+    transcript: dict[str, Any],
+    style: str,
+    instruction: PolishInstruction,
+    harness: str,
+) -> dict[str, Any]:
+    track = transcript.get("track") or {}
+    return {
+        "video_id": transcript.get("video_id"),
+        "url": transcript.get("url"),
+        "language": transcript.get("language"),
+        "caption_name": track.get("name"),
+        "caption_auto_generated": track.get("auto_generated"),
+        "segments": len(transcript.get("segments") or []),
+        "transcript_chars": len(transcript.get("text") or ""),
+        "style": style,
+        "instruction_mode": instruction.mode,
+        "instruction_sources": instruction.sources,
+        "agent_harness": harness,
+    }
+
+
+def run_front_matter(
+    transcript: dict[str, Any],
+    style: str,
+    instruction: PolishInstruction,
+    harness: str,
+) -> str:
+    return render_front_matter(run_front_matter_data(transcript, style, instruction, harness))
+
+
+def apply_output_prefix(result: dict[str, Any], prefix: str) -> dict[str, Any]:
+    if not prefix:
+        return result
+
+    if result["output_path"]:
+        path = Path(result["output_path"])
+        final_text = prefix + path.read_text(encoding="utf-8")
+        path.write_text(final_text, encoding="utf-8")
+    else:
+        final_text = prefix + result["text"]
+        result = {**result, "text": final_text}
+
+    return {**result, "chars": len(final_text)}
+
 
 def emit(data: Any, as_json: bool, text: str | None = None) -> None:
     if as_json:
