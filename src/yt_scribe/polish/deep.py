@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from .. import CliError, ProgressReporter
+from ..file_io import write_text
 from ..runs import (
     read_json_file,
     update_deep_engine_metadata,
     utc_timestamp,
     write_bundle_metadata,
-    write_text,
 )
 from ..transcripts import DEEP_CHUNK_MAX_CHARS
 from .chunked import merge_chunk_instruction

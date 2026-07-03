@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import CliError, ProgressReporter
-from ..runs import write_text
+from ..file_io import write_text
 from ..setup import command_invocation, command_path
 
 __all__ = [

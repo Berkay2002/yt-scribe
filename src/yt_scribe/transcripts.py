@@ -10,11 +10,13 @@ from typing import Any
 from youtube_transcript_api.proxies import GenericProxyConfig
 
 from . import CliError
+from .file_io import write_text
 from .youtube import extract_video_id, fetch_transcript
 
 DEEP_CHUNK_TARGET_SECONDS = 10 * 60
 DEEP_CHUNK_OVERLAP_SECONDS = 45
 DEEP_CHUNK_MAX_CHARS = 15_000
+
 
 def srt_timestamp(seconds: float) -> str:
     millis = int(round(seconds * 1000))
@@ -170,8 +172,6 @@ def fetch_transcript_payload(
         if timestamps and output_format == "text"
         else render_transcript(transcript, output_format)
     )
-    from .runs import write_text
-
     output_path = write_text(out_path, rendered)
     fetch_payload = {
         "video_id": transcript["video_id"],

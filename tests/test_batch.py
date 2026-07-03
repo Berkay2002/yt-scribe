@@ -28,6 +28,17 @@ def test_batch_module_expands_playlist_items(monkeypatch):
     ]
 
 
+def test_batch_module_does_not_fetch_non_youtube_playlist_like_urls(monkeypatch):
+    def fail_fetch(url, proxy_config):
+        raise AssertionError(f"unexpected playlist fetch: {url}")
+
+    monkeypatch.setattr(batch, "fetch_playlist_video_ids", fail_fetch)
+
+    items = batch.expand_batch_items(["https://example.com/watch?list=PLabc123"], None)
+
+    assert items == [{"url": "https://example.com/watch?list=PLabc123"}]
+
+
 def test_batch_module_finds_next_available_output_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     Path("yt-scribe-dQw4w9WgXcQ-notes.md").write_text("existing", encoding="utf-8")

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import CliError
+from .file_io import write_text
 from .transcripts import (
     DEEP_CHUNK_MAX_CHARS,
     DEEP_CHUNK_OVERLAP_SECONDS,
@@ -23,14 +24,6 @@ COMMAND_NAME = "yt-scribe"
 DATA_DIR_ENV_VAR = "YT_SCRIBE_DATA_DIR"
 RUN_REGISTRY_FILENAME = "registry.json"
 
-
-def write_text(path: str | None, text: str) -> str | None:
-    if not path:
-        return None
-    target = Path(path).expanduser().resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-    return str(target)
 
 def bundle_paths(bundle_dir: str | None) -> dict[str, str] | None:
     if not bundle_dir:

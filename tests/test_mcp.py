@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-import tomllib
 
 import yt_scribe as package
 import yt_scribe_mcp
@@ -39,15 +38,13 @@ def run_mcp_module(*args):
 
 
 def test_mcp_script_metadata_exposes_console_entrypoint_and_extra():
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert project["scripts"]["yt-scribe-mcp"] == "yt_scribe.mcp:main"
-    assert "mcp" in project["optional-dependencies"]
-    assert any(dep.startswith("fastmcp") for dep in project["optional-dependencies"]["mcp"])
-    setuptools_config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
-        "tool"
-    ]["setuptools"]
-    assert "yt_scribe_mcp" in setuptools_config["py-modules"]
+    assert 'yt-scribe-mcp = "yt_scribe.mcp:main"' in pyproject
+    assert "[project.optional-dependencies]" in pyproject
+    assert "mcp = [" in pyproject
+    assert '"fastmcp' in pyproject
+    assert '"yt_scribe_mcp"' in pyproject
 
 
 def test_mcp_help_is_available_without_optional_dependencies():

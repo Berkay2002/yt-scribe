@@ -383,7 +383,7 @@ def handle_args(args: argparse.Namespace) -> int:
         limited_text = limit_text(transcript_text, args.max_chars)
         progress.message(f"Loaded transcript ({len(limited_text)} chars)")
         out_path = (
-            args.out
+            None
             if args.stdout
             else args.out or str(default_polish_output_path(args.file, args.style))
         )
@@ -488,7 +488,7 @@ def handle_args(args: argparse.Namespace) -> int:
             out_path = args.out or bundle["polished"]
         else:
             out_path = (
-                args.out
+                None
                 if args.stdout
                 else args.out
                 or (bundle["polished"] if bundle else None)
@@ -928,6 +928,16 @@ def handle_args(args: argparse.Namespace) -> int:
     raise CliError("Unhandled command", "internal_error")
 
 
+def add_output_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--out", help="write polished output to this file")
+    parser.add_argument(
+        "--stdout",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="print polished output instead of writing a file",
+    )
+
+
 def add_polish_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--style",
@@ -939,13 +949,6 @@ def add_polish_flags(parser: argparse.ArgumentParser) -> None:
         "--template",
         choices=sorted(TEMPLATE_INSTRUCTIONS),
         help="safe output structure to compose with the selected style",
-    )
-    parser.add_argument("--out", help="write polished output to this file")
-    parser.add_argument(
-        "--stdout",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="print polished output instead of writing a file",
     )
     parser.add_argument(
         "--focus",
@@ -1192,6 +1195,7 @@ ai contract:
         help="polish an existing transcript with the configured agent",
     )
     polish_parser.add_argument("file", help="transcript file to polish")
+    add_output_flags(polish_parser)
     add_polish_flags(polish_parser)
 
     run_parser = subparsers.add_parser(
@@ -1241,6 +1245,7 @@ ai contract:
         help="advanced: polish transcript chunks of roughly this many characters",
     )
     add_proxy_flags(run_parser)
+    add_output_flags(run_parser)
     add_polish_flags(run_parser)
 
     batch_parser = subparsers.add_parser(

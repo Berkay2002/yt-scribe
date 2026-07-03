@@ -88,9 +88,11 @@ def run_chunked_agent_polish(
     for index, chunk in enumerate(chunks, start=1):
         chunk_path = chunk_output_path(artifact_dir, index) if artifact_dir else None
         if resume and chunk_path and chunk_path.is_file():
-            polished_chunks.append(chunk_path.read_text(encoding="utf-8"))
-            resumed_chunks += 1
-            continue
+            existing_text = chunk_path.read_text(encoding="utf-8")
+            if existing_text.strip():
+                polished_chunks.append(existing_text)
+                resumed_chunks += 1
+                continue
         try:
             result = run_agent_polish(
                 transcript_text=chunk,

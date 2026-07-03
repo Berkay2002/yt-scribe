@@ -10,7 +10,7 @@ from typing import Any
 from youtube_transcript_api.proxies import GenericProxyConfig
 
 from .. import PolishInstruction, ProgressReporter
-from ..runs import write_text
+from ..file_io import write_text
 from ..transcripts import (
     load_or_fetch_transcript,
     render_timestamped_transcript,
@@ -93,6 +93,7 @@ def apply_output_prefix(result: dict[str, Any], prefix: str) -> dict[str, Any]:
         path = Path(result["output_path"])
         final_text = prefix + path.read_text(encoding="utf-8")
         path.write_text(final_text, encoding="utf-8")
+        result = {**result, "text": final_text}
     else:
         final_text = prefix + result["text"]
         result = {**result, "text": final_text}

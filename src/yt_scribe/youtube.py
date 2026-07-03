@@ -537,6 +537,9 @@ def fetch_transcript(
 
 def playlist_id_from_url(value: str) -> str | None:
     parsed = urllib.parse.urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if host and host != "youtube.com" and not host.endswith(".youtube.com"):
+        return None
     query = urllib.parse.parse_qs(parsed.query)
     playlist_ids = query.get("list") or []
     if playlist_ids:

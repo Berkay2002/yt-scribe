@@ -11,11 +11,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import EMBEDDED_SKILL_ASSETS
+from . import EMBEDDED_SKILL_ASSETS, CliError
 
 COMMAND_NAME = "yt-scribe"
 AGENTS_SKILLS_DIR_ENV_VAR = "YT_SCRIBE_AGENTS_SKILLS_DIR"
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
 
 def command_path(name: str) -> str | None:
     return shutil.which(name)
@@ -79,7 +80,14 @@ def asset_content(relative_path: str) -> str:
     source = source_asset_path(relative_path)
     if source:
         return source.read_text(encoding="utf-8")
-    return EMBEDDED_SKILL_ASSETS[relative_path]
+    try:
+        return EMBEDDED_SKILL_ASSETS[relative_path]
+    except KeyError as exc:
+        raise CliError(
+            f"Missing embedded skill asset: {relative_path}",
+            "embedded_asset_missing",
+            {"path": relative_path},
+        ) from exc
 
 
 def skill_asset_targets() -> dict[str, Path]:

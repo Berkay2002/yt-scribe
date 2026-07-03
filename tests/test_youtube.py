@@ -48,6 +48,11 @@ def test_youtube_module_extracts_playlist_video_ids(monkeypatch):
     ]
 
 
+def test_youtube_module_only_treats_youtube_hosts_as_playlists():
+    assert youtube.playlist_id_from_url("https://www.youtube.com/playlist?list=PLabc") == "PLabc"
+    assert youtube.playlist_id_from_url("https://example.com/watch?list=PLabc") is None
+
+
 def test_raw_caption_tracks_treats_invalid_caption_metadata_as_missing(monkeypatch):
     monkeypatch.setattr(
         youtube,

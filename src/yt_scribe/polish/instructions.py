@@ -110,12 +110,24 @@ def custom_instruction_parts(
             sources.append("--focus")
 
     for focus_file in getattr(args, "focus_file", None) or []:
-        content = Path(focus_file).expanduser().read_text(encoding="utf-8").strip()
+        content = read_instruction_file(focus_file, "--focus-file").strip()
         if content:
             parts.append(content)
             sources.append("--focus-file")
 
     return parts, sources
+
+
+def read_instruction_file(path: str, source: str) -> str:
+    expanded = Path(path).expanduser()
+    try:
+        return expanded.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CliError(
+            f"Could not read {source} {expanded}: {exc}",
+            "instruction_file_read_failed",
+            {"path": str(expanded), "source": source},
+        ) from exc
 
 
 def resolve_instruction(
@@ -146,7 +158,7 @@ def resolve_instruction(
         )
 
     if getattr(args, "prompt_file", None):
-        text = Path(args.prompt_file).expanduser().read_text(encoding="utf-8").strip()
+        text = read_instruction_file(args.prompt_file, "--prompt-file").strip()
         if timestamp_sources:
             text += f"\n\n{TIMESTAMP_GROUNDING_INSTRUCTION}"
         return PolishInstruction(

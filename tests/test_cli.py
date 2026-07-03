@@ -4,8 +4,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import tomllib
-
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "yt_scribe.py"
 
@@ -39,9 +37,9 @@ def test_module_entrypoint_runs_cli():
 
 
 def test_cli_script_metadata_uses_package_adapter():
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert project["scripts"]["yt-scribe"] == "yt_scribe.cli:main"
+    assert 'yt-scribe = "yt_scribe.cli:main"' in pyproject
 
 
 def test_help_exposes_human_and_agent_lifecycle():
@@ -85,6 +83,16 @@ def test_run_help_exposes_chunking_option():
     assert "45 minutes" in result.stdout
     assert "--chunk-chars" in result.stdout
     assert "--bundle-dir" in result.stdout
+
+
+def test_batch_help_uses_batch_output_flags():
+    result = run_cli("batch", "--help")
+
+    assert result.returncode == 0
+    assert "--out-dir" in result.stdout
+    assert "--manifest" in result.stdout
+    assert "--stdout" not in result.stdout
+    assert "--out " not in result.stdout
 
 
 def test_runs_help_exposes_run_management_commands():

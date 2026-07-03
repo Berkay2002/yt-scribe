@@ -862,6 +862,7 @@ class YtScribeTests(unittest.TestCase):
             polish.call_args.kwargs["transcript_text"],
             "[00:01] hello world\n[01:02] second point",
         )
+        self.assertIsNone(polish.call_args.kwargs["out_path"])
         self.assertIn("timestamp anchors", polish.call_args.kwargs["instruction"])
         self.assertTrue(payload["run"]["timestamp_grounding"])
         self.assertIn("--timestamps", payload["run"]["instruction_sources"])
@@ -994,12 +995,74 @@ class YtScribeTests(unittest.TestCase):
         self.assertEqual(result["chunking"]["resumed_chunks"], 1)
         self.assertEqual(result["chunking"]["merge_status"], "merged")
 
+    def test_chunked_polish_resume_repolishes_empty_chunk_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "notes.md"
+            chunk_dir = polish.chunk_artifact_dir(str(output_path))
+            assert chunk_dir is not None
+            chunk_dir.mkdir()
+            (chunk_dir / "chunk-001.md").write_text("", encoding="utf-8")
+            calls = []
+
+            def fake_polish(**kwargs):
+                calls.append(kwargs)
+                if len(calls) == 1:
+                    self.assertEqual(kwargs["transcript_text"], "first")
+                    return {
+                        "output_path": runs.write_text(kwargs["out_path"], "first chunk\n"),
+                        "chars": len("first chunk\n"),
+                        "harness": "codex",
+                        "text": "first chunk\n",
+                    }
+                if len(calls) == 2:
+                    self.assertEqual(kwargs["transcript_text"], "second")
+                    return {
+                        "output_path": runs.write_text(kwargs["out_path"], "second chunk\n"),
+                        "chars": len("second chunk\n"),
+                        "harness": "codex",
+                        "text": "second chunk\n",
+                    }
+                self.assertIn("first chunk", kwargs["transcript_text"])
+                self.assertIn("second chunk", kwargs["transcript_text"])
+                return {
+                    "output_path": runs.write_text(kwargs["out_path"], "merged\n"),
+                    "chars": len("merged\n"),
+                    "harness": "codex",
+                    "text": "merged\n",
+                }
+
+            with patch.object(polish_chunked, "run_agent_polish", side_effect=fake_polish):
+                result = polish.run_chunked_agent_polish(
+                    chunks=["first", "second"],
+                    instruction="Polish.",
+                    out_path=str(output_path),
+                    model=None,
+                    cwd=None,
+                    harness="codex",
+                    chunk_chars=25,
+                    resume=True,
+                    progress=None,
+                )
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(result["chunking"]["resumed_chunks"], 0)
+        self.assertEqual(result["chunking"]["merge_status"], "merged")
+
     def test_polish_with_timestamps_reports_json_and_prompt_contract(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             transcript_path = Path(tmp_dir) / "transcript.txt"
             transcript_path.write_text("[00:01] hello world\n", encoding="utf-8")
+            ignored_output = Path(tmp_dir) / "ignored.md"
             args = cli.build_parser().parse_args(
-                ["--json", "polish", str(transcript_path), "--stdout", "--timestamps"],
+                [
+                    "--json",
+                    "polish",
+                    str(transcript_path),
+                    "--out",
+                    str(ignored_output),
+                    "--stdout",
+                    "--timestamps",
+                ],
             )
             stdout = io.StringIO()
 
@@ -1021,6 +1084,8 @@ class YtScribeTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertEqual(polish.call_args.kwargs["transcript_text"], "[00:01] hello world\n")
+        self.assertIsNone(polish.call_args.kwargs["out_path"])
+        self.assertFalse(ignored_output.exists())
         self.assertIn("timestamp anchors", polish.call_args.kwargs["instruction"])
         self.assertTrue(payload["polish"]["timestamp_grounding"])
 
