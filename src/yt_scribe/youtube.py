@@ -537,6 +537,8 @@ def fetch_transcript(
 
 def playlist_id_from_url(value: str) -> str | None:
     parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in {"http", "https"}:
+        return None
     host = (parsed.hostname or "").lower()
     if host and host != "youtube.com" and not host.endswith(".youtube.com"):
         return None
