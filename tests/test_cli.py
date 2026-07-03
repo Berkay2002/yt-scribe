@@ -19,6 +19,29 @@ def run_cli(*args, env=None):
     )
 
 
+def run_module(*args):
+    return subprocess.run(
+        [sys.executable, "-m", "yt_scribe", *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_module_entrypoint_runs_cli():
+    result = run_module("--version")
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "yt-scribe 0.1.0"
+
+
+def test_cli_script_metadata_uses_package_adapter():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'yt-scribe = "yt_scribe.cli:main"' in pyproject
+
+
 def test_help_exposes_human_and_agent_lifecycle():
     result = run_cli("--help")
 
@@ -60,6 +83,16 @@ def test_run_help_exposes_chunking_option():
     assert "45 minutes" in result.stdout
     assert "--chunk-chars" in result.stdout
     assert "--bundle-dir" in result.stdout
+
+
+def test_batch_help_uses_batch_output_flags():
+    result = run_cli("batch", "--help")
+
+    assert result.returncode == 0
+    assert "--out-dir" in result.stdout
+    assert "--manifest" in result.stdout
+    assert "--stdout" not in result.stdout
+    assert "--out " not in result.stdout
 
 
 def test_runs_help_exposes_run_management_commands():
